@@ -1,0 +1,10 @@
+[
+    {
+    "uuid": "laplace-sentry-control-v2-self",
+    "name": "laplace_sentry_control_v2 (self-monitoring)",
+    "path": ".",
+    "md_file": "./README.md",
+    "status": "stopped",
+    "pid": null
+    }
+]

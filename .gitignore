@@ -1,0 +1,18 @@
+# 忽略 Python 編譯產生的暫存檔案
+__pycache__/
+*.pyc
+
+# 忽略操作系統和編輯器產生的暫存檔案
+.DS_Store
+.vscode/
+
+# 忽略由我們系統在運行時自動生成的目錄
+# 這些是「產出物」，而不是「原始碼」，不應被版本控制
+logs/
+pids/
+watchers/
+backups/
+
+# 忽略 Python 虛擬環境目錄
+.venv/
+venv/
