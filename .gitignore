@@ -1,18 +1,14 @@
-# 忽略 Python 編譯產生的暫存檔案
-__pycache__/
-*.pyc
+# 忽略所有日誌文件和目錄
+/logs/
+*.log
 
-# 忽略操作系統和編輯器產生的暫存檔案
-.DS_Store
-.vscode/
+# 忽略所有備份和存檔目錄
+/_archive/
 
-# 忽略由我們系統在運行時自動生成的目錄
-# 這些是「產出物」，而不是「原始碼」，不應被版本控制
-logs/
-pids/
-watchers/
-backups/
+# 忽略測試腳手架中生成的臨時文件
+/test_scaffold/*
+# 但不要忽略腳手架本身存在的證明文件
+!/test_scaffold/README.md
 
-# 忽略 Python 虛擬環境目錄
-.venv/
-venv/
+# 忽略個人的、非核心的 Markdown 文件
+三版分析.md
