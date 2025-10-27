@@ -10,42 +10,37 @@ import re
 
 # 我們用「def」來 定義（define）一個名叫「normalize_path」的函式。
 # 這是我們「尋路專家」最核心的「翻譯」能力。
+# 在 src/core/path.py 中
+
 def normalize_path(path_str):
     """
     將各種平台、各種格式的原始路徑字串，標準化為統一的、在 WSL 中可用的 Linux 路徑格式。
+    【v2.1 終極剝離版】
     """
-    # 我們用「if not」來判斷，如果（if）傳入的「path_str」不是一個「字串（string）」...
     if not isinstance(path_str, str):
-        # 就直接「返回（return）」一個空字串，防止後續出錯。
         return ""
-        
-    # 我們準備一個叫「p」的臨時「變數盒子」，用來存放傳入的路徑。
-    # 「strip()」這個動作，就像是「剝掉」字串頭尾多餘的空格或引號。
-    p = path_str.strip().strip("'\"")
-    # 「replace()」這個動作，是把所有的「\\」都「替換」成「/」。
+    
+    # 【終極加固】使用一個 while 循環，來反复、徹底地剝離任何可能存在的多層引號
+    p = path_str.strip()
+    while p.startswith(('"', "'")) and p.endswith(('"', "'")):
+        p = p[1:-1].strip()
+    
     p = p.replace("\\", "/")
     
-    # 我們用「re.search」這個「正規表達式」工具，來「搜尋（search）」路徑中是否包含特定的模式。
-    # 這裡是在尋找 "//wsl.localhost/..." 這種 WSL 網路路徑格式。
     match_wsl = re.search(r"//wsl\.localhost/[^/]+/(.*)", p, re.IGNORECASE)
-    # 如果（if）找到了...
     if match_wsl:
-        # 我們就只取出「group(1)」也就是括號裡匹配到的部分，並在最前面加上「/」。
         p = "/" + match_wsl.group(1)
         
-    # 這裡是在尋找 "C:/..." 這種 Windows 磁碟機路徑格式。
     match_drive = re.match(r"([A-Za-z]):/(.*)", p)
     if match_drive:
-        # 我們就把磁碟機代號（如 'C'）取出來，轉成小寫，
         drive_letter = match_drive.group(1).lower()
-        # 然後把它拼接成 "/mnt/c/..." 的格式。
         rest_of_path = match_drive.group(2)
         p = f"/mnt/{drive_letter}/{rest_of_path}"
         
-    # 最後，我們用「re.sub」這個工具，來「替換（substitute）」掉多個連續的斜線（如 "//"），讓它變成一個。
     p = re.sub(r"/{2,}", "/", p)
-    # 「返回（return）」最終處理好的、乾淨的路徑。
     return p
+
+
 
 
 #  -----------------------------------------------------------------------
@@ -78,21 +73,22 @@ def handle_read(filepath):
 
 
 # 我們用「def」來 定義（define）一個專門處理「寫入」命令的函式。
-def handle_write(filepath, content):
-    # 我們用「os.path.dirname()」來獲取檔案所在地的「父目錄」。
+def handle_write(filepath):
+    # 【v2.0 管道兼容版】不再接收 content 參數，而是從標準輸入讀取
     parent_dir = os.path.dirname(filepath)
-    # 如果（if）這個父目錄存在，並且（and not）它不是一個「資料夾（directory）」...
     if parent_dir and not os.path.isdir(parent_dir):
         print(f"【尋路專家錯誤】：要寫入的目標檔案所在的資料夾不存在！\n  -> {parent_dir}", file=sys.stderr)
         sys.exit(2)
     try:
-        # 「with open(...)」用「'w'」模式來「寫入（write）」檔案。
+        # 從標準輸入讀取所有要寫入的內容
+        content_to_write = sys.stdin.read()
         with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(content)
+            f.write(content_to_write)
         sys.exit(0)
     except Exception as e:
         print(f"【尋路專家錯誤】：寫入檔案 '{filepath}' 時發生未知錯誤！\n  -> {e}", file=sys.stderr)
         sys.exit(3)
+
 
 # 我們用「def」來 定義（define）一個專門處理「驗證」命令的函式。
 def handle_validate(paths):
@@ -125,9 +121,8 @@ def main():
     parser_read.add_argument('path', help='要讀取的檔案路徑。')
     
     # 4. 定義「write」這個「子翻譯官」。
-    parser_write = subparsers.add_parser('write', help='將內容寫入一個檔案。')
+    parser_write = subparsers.add_parser('write', help='從標準輸入讀取內容，並將其寫入一個檔案。')
     parser_write.add_argument('path', help='要寫入的檔案路徑。')
-    parser_write.add_argument('content', help='要寫入的文字內容。')
 
     # 5. 定義「validate」這個「子翻譯官」。
     parser_validate = subparsers.add_parser('validate', help='驗證一個或多個路徑是否存在。')
@@ -150,7 +145,8 @@ def main():
         handle_read(normalized_filepath)
     elif args.command == 'write':
         normalized_filepath = normalize_path(args.path)
-        handle_write(normalized_filepath, args.content)
+        # 因為 handle_write 現在從標準輸入讀取，所以不再需要傳遞第二個參數
+        handle_write(normalized_filepath) 
     elif args.command == 'validate':
         # 我們用一個「列表推導式」，來一次性把所有傳入的路徑都進行標準化。
         normalized_paths = [normalize_path(p) for p in args.paths]
