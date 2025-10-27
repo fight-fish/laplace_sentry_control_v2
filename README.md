@@ -51,13 +51,42 @@
 git add .
 git commit -m "類型(範圍): 做了什麼事"
 
+清理環境
+
+pkill -f "inotifywait" || true
+rm -f /tmp/sentry_test.pid
+rm -f logs/sentry_test.log
+rm -rf test_scaffold/*
+
+查看日誌
+cat logs/sentry_test.log
+
 ---
 
 ## 專案結構
 
 <!-- AUTO_TREE_START -->
-
-<!-- 目錄樹將在首次運行更新腳本後，自動生成於此 -->
-
+laplace_sentry_control_v2/
+├── backups/                              # TODO: Add comment here
+├── data/                                 # TODO: Add comment here
+│   └── projects.json                     # TODO: Add comment here
+├── logs/                                 # TODO: Add comment here
+├── src/                                  # TODO: Add comment here
+│   ├── core/                             # TODO: Add comment here
+│   │   ├── engine.py                     # TODO: Add comment here
+│   │   └── path.py                       # TODO: Add comment here
+│   └── shell/                            # TODO: Add comment here
+│       ├── control.sh                    # TODO: Add comment here
+│       └── diagnostics.sh                # TODO: Add comment here
+├── test_data/                            # TODO: Add comment here
+│   └── expected_control_flow_output.txt  # TODO: Add comment here
+├── watchers/                             # TODO: Add comment here
+├── 代碼避難所/                                # TODO: Add comment here
+│   ├── path_engine.v1_for_control_sh.py  # TODO: Add comment here
+│   └── structure_engine.py               # TODO: Add comment here
+├── .gitignore                            # TODO: Add comment here
+├── README.md                             # TODO: Add comment here
+├── install.sh                            # TODO: Add comment here
+├── mock_readme.md                        # TODO: Add comment here
+└── 三版分析.md                               # TODO: Add comment here
 <!-- AUTO_TREE_END -->
-

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Laplace Sentry Control - 管理專家
-# 版本: 2.8 (撥亂反正版)
+# 版本: 2.4.9 (穩定版 - 已移除不穩定的哨兵功能)
 
 # --- 嚴格模式與全域變數 ---
 set -euo pipefail
@@ -11,7 +11,10 @@ ENGINE_SCRIPT_PATH="${SCRIPT_DIR}/../core/engine.py"
 PATH_SCRIPT_PATH="${SCRIPT_DIR}/../core/path.py"
 # 如果外部通過第二個參數傳入了設定檔路徑，就用它；否則，使用預設路徑。
 PROJECTS_FILE=${2:-"${SCRIPT_DIR}/../../data/projects.json"}
+
 LOGS_DIR="${SCRIPT_DIR}/../../logs"
+
+
 
 # --- 環境初始化 ---
 mkdir -p "$LOGS_DIR"
@@ -19,20 +22,21 @@ if [ ! -f "$PROJECTS_FILE" ] || ! jq -e 'if type == "array" then true else false
     echo "[]" > "$PROJECTS_FILE"
 fi
 
+
+
 # ==============================================================================
 #  UI 函式區 (使用者介面)
 # ==============================================================================
+
 show_main_menu() {
     clear
     echo "========================================"
-    echo "   通用目錄哨兵 - 控制中心 v2.9"
+    echo "   通用目錄哨兵 - 控制中心 v2.4.9"
     echo "========================================"
     echo "  [1] 列出所有專案"
     echo "  [2] 新增一個專案"
     echo "  [3] 修改一個專案"
     echo "  [4] 刪除一個專案"
-    echo "  [5] 啟動哨兵"
-    echo "  [6] 停止哨兵"
     echo "----------------------------------------"
     echo "  [u] 手動觸發一次更新..."
     echo "----------------------------------------"
@@ -41,37 +45,45 @@ show_main_menu() {
     echo -n "請輸入您的選擇: "
 }
 
-
 # ==============================================================================
 #  核心功能函式區
 # ==============================================================================
+
 abort_with_msg() {
     echo -e "\n❌ \e[31m錯誤: $1\e[0m" >&2
     read -n 1 -s -r -p "按任意鍵返回..."
     return 1
 }
 
+
+
 run_update() {
     local project_path=$1
     local target_doc_path=$2
+    
     echo "--- 開始執行手動更新 ---"
     echo "  - 監控目標: ${project_path}"
     echo "  - 輸出文件: ${target_doc_path}"
+
     local head tail start_marker end_marker
     start_marker="<!-- AUTO_TREE_START -->"
     end_marker="<!-- AUTO_TREE_END -->"
+
     local full_old_content
     full_old_content=$(python3 "$PATH_SCRIPT_PATH" read "$target_doc_path" || true)
+
     local old_tree_for_engine=""
     if [[ "$full_old_content" == *"$start_marker"* ]]; then
         local temp="${full_old_content#*$start_marker}"
         old_tree_for_engine="${temp%%$end_marker*}"
     fi
+
     local new_tree_content
     new_tree_content=$(echo "$old_tree_for_engine" | python3 "$ENGINE_SCRIPT_PATH" "$project_path" "-")
     if [ $? -ne 0 ]; then
         abort_with_msg "引擎專家在生成目錄樹時出錯。" || return
     fi
+
     local final_content
     if [[ "$full_old_content" == *"$start_marker"* ]]; then
         head="${full_old_content%%$start_marker*}"
@@ -84,6 +96,7 @@ run_update() {
             final_content=$(printf "%s\n\n%s\n%s\n%s" "$full_old_content" "$start_marker" "$new_tree_content" "$end_marker")
         fi
     fi
+    
     if ! python3 "$PATH_SCRIPT_PATH" write "$target_doc_path" "$final_content"; then
         abort_with_msg "路徑專家在寫入文件時出錯。" || return
     fi
@@ -114,17 +127,23 @@ manual_update() {
     fi
     local index=$((choice - 1))
     local name="${projects[$index]}"
+    
     local path
     path=$(jq -r --arg n "$name" '.[] | select(.name == $n) | .path' "$PROJECTS_FILE")
     local md_file
     md_file=$(jq -r --arg n "$name" '.[] | select(.name == $n) | .md_file' "$PROJECTS_FILE")
+
+    # 【關鍵】在呼叫 run_update 前，對路徑進行淨化
     local normalized_path
     normalized_path=$(python3 "$PATH_SCRIPT_PATH" validate "$path" |& tail -n 1)
     local normalized_md_file
     normalized_md_file=$(python3 "$PATH_SCRIPT_PATH" validate "$md_file" |& tail -n 1)
+
     run_update "$normalized_path" "$normalized_md_file"
     read -n 1 -s -r -p "按任意鍵返回主菜單..."
 }
+
+
 
 list_projects() {
     clear
@@ -147,12 +166,12 @@ add_project() {
     if [[ -z "$project_name" || -z "$project_path" || -z "$md_file_path" ]]; then abort_with_msg "所有欄位均不能為空。" || return; fi
     if ! python3 "$PATH_SCRIPT_PATH" validate "$project_path" "$md_file_path"; then abort_with_msg "路徑驗證失敗。" || return; fi
     if jq -e --arg n "$project_name" '.[] | select(.name == $n)' "$PROJECTS_FILE" > /dev/null; then abort_with_msg "專案別名已存在。" || return; fi
-    
-    # 【核心修正】先在 Shell 中生成 UUID，再通過 --arg 安全傳入，避免引號混亂
-    local new_uuid
-    new_uuid=$(uuidgen)
     local updated_json
-    updated_json=$(jq --arg uuid "$new_uuid" --arg name "$project_name" --arg path "$project_path" --arg mdfile "$md_file_path" '. + [{uuid: $uuid, name: $name, path: $path, md_file: $mdfile}]' "$PROJECTS_FILE")
+
+# 【核心修正】先在 Shell 中生成 UUID，再通過 --arg 安全傳入，避免引號混亂
+local new_uuid
+new_uuid=$(uuidgen)
+updated_json=$(jq --arg uuid "$new_uuid" --arg name "$project_name" --arg path "$project_path" --arg mdfile "$md_file_path" '. + [{uuid: $uuid, name: $name, path: $path, md_file: $mdfile}]' "$PROJECTS_FILE")
     
     echo "$updated_json" > "$PROJECTS_FILE"
     echo -e "\n✅ 成功新增專案！"; read -n 1 -s -r -p "按任意鍵繼續..."
@@ -199,111 +218,32 @@ delete_project() {
     echo -e "\n✅ 成功刪除專案！"; read -n 1 -s -r -p "按任意鍵繼續..."
 }
 
+
 start_sentry() {
-    clear
-    echo "--- 啟動哨兵 ---"
-    mapfile -t projects < <(jq -r '.[].name' "$PROJECTS_FILE")
-    if [ ${#projects[@]} -eq 0 ]; then echo "沒有專案可供啟動哨兵。"; read -n 1 -s -r -p "按任意鍵返回..."; return 0; fi
-    echo "請選擇要啟動哨兵的專案編號："; for i in "${!projects[@]}"; do echo "  [$((i + 1))] ${projects[$i]}"; done; echo "  [q] 取消";
-    local choice; read -r -p "請輸入您的選擇: " choice
-    if [[ "$choice" =~ ^[qQ]$ ]]; then return 0; fi
-    if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#projects[@]} )); then abort_with_msg "輸入無效。" || return; fi
-    local index=$((choice - 1)); local name="${projects[$index]}"
-    local project_json; project_json=$(jq --arg n "$name" '.[] | select(.name == $n)' "$PROJECTS_FILE")
-    local project_path; project_path=$(echo "$project_json" | jq -r '.path')
-    local md_file_path; md_file_path=$(echo "$project_json" | jq -r '.md_file')
+    set -x
+    echo "--- 正在啟動哨兵 ---"
+    # 讀取第一個專案的路徑 (在我們的測試中，只會有一個專案)
+    # 我們使用 jq 來安全地讀取第一個專案的 .path 欄位
+    local project_path
+    project_path=$(jq -r '.[0].path' "$PROJECTS_FILE")
 
-    # 【核心修正】在將路徑用於任何 Linux 命令之前，必須先通過尋路專家進行淨化
-    local normalized_project_path
-    normalized_project_path=$(python3 "$PATH_SCRIPT_PATH" normalize "$project_path")
-    local normalized_md_file_path
-    normalized_md_file_path=$(python3 "$PATH_SCRIPT_PATH" normalize "$md_file_path")
+    # 如果沒有讀到任何專案路徑，就報錯並退出
+    if [ -z "$project_path" ]; then
+        abort_with_msg "專案設定檔中沒有找到任何專案。" || return
+    fi
 
-    local pid_file="/tmp/sentry_${name}.pid"
+    echo "  > 正在為專案路徑啟動監控: ${project_path}"
 
-    if [ -f "$pid_file" ]; then abort_with_msg "專案 '$name' 的哨兵似乎已在運行中 (PID 檔案已存在)。請先停止它。" || return; fi
-
-    echo "  > 正在為專案 '${name}' 啟動監控: ${project_path}"
-    
-    # 【核心改造】背景執行的不再是複雜的子 Shell，而是直接調用職責單一的 worker.sh
-    (
-        # 【終極簡化方案】獲取 worker.sh 的絕對路徑
-        local worker_script_path
-        worker_script_path=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)/worker.sh
-
-        # 淨化路徑
-        local normalized_project_path
-        normalized_project_path=$(python3 "$PATH_SCRIPT_PATH" normalize "$project_path")
-        local normalized_md_file_path
-        normalized_md_file_path=$(python3 "$PATH_SCRIPT_PATH" normalize "$md_file_path")
-
-        # 監測到事件後，直接調用 worker.sh，並把兩個淨化後的絕對路徑傳給它
-        inotifywait -m -q -e modify,create,delete,move --format '%e' "$normalized_project_path" | while read -r event; do
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 監測到事件，正在呼叫工人..."
-            bash "$worker_script_path" "$normalized_project_path" "$normalized_md_file_path"
-        done
-    ) > "${LOGS_DIR}/sentry_${name}.log" 2>&1 &
-
-
-    local sentry_pid=$!
-    echo "$sentry_pid" > "$pid_file"
-    
-    echo "✅ 專案 '${name}' 的哨兵已啟動，PID 為: ${sentry_pid}"
-    read -n 1 -s -r -p "按任意鍵返回主菜單..."
-}
-
-
-
+# 【核心改造】啟用專屬日誌進行深度偵錯
+local sentry_log_file="${LOGS_DIR}/sentry_debug.log"
+echo "  > 哨兵偵錯日誌將記錄在: ${sentry_log_file}"
+# 我們將標準輸出和標準錯誤都重定向到這個專屬日誌檔案
+(inotifywait -m -r -e modify,create,delete,move --format '%w%f' "$project_path" > "$sentry_log_file" 2>&1 &)
 
 
 stop_sentry() {
-    clear
-    echo "--- 停止哨兵 ---"
-    # 【核心改造】移植交互式選擇邏輯
-    mapfile -t projects < <(jq -r '.[].name' "$PROJECTS_FILE")
-    if [ ${#projects[@]} -eq 0 ]; then
-        echo "目前沒有任何專案可供停止哨兵。"
-        read -n 1 -s -r -p "按任意鍵返回..."
-        return 0
-    fi
-    echo "請選擇要停止哨兵的專案編號："
-    for i in "${!projects[@]}"; do
-        echo "  [$((i + 1))] ${projects[$i]}"
-    done
-    echo "  [q] 取消並返回"
-    echo "-----------------------------------------"
-    local choice
-    read -r -p "請輸入您的選擇: " choice
-    if [[ "$choice" =~ ^[qQ]$ ]]; then return 0; fi
-    if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#projects[@]} )); then
-        abort_with_msg "輸入無效。" || return
-    fi
-    local index=$((choice - 1))
-    local name="${projects[$index]}"
-
-    # 【核心改造】根據選擇的專案名，生成正確的 PID 檔案路徑
-    local pid_file="/tmp/sentry_${name}.pid"
-
-    if [ ! -f "$pid_file" ]; then
-        abort_with_msg "專案 '${name}' 的哨兵並未運行 (找不到 PID 檔案)。" || return
-    fi
-
-    local pid_to_kill
-    pid_to_kill=$(cat "$pid_file")
-
-    if ! [[ "$pid_to_kill" =~ ^[0-9]+$ ]]; then
-        abort_with_msg "專案 '${name}' 的 PID 檔案內容無效。" || return
-    fi
-
-    echo "  > 正在嘗試停止 PID 為 ${pid_to_kill} 的哨兵進程..."
-    if kill "$pid_to_kill" 2>/dev/null; then
-        echo "  > 成功發送停止信號。"
-    else
-        echo "  > 哨兵進程 (PID: ${pid_to_kill}) 已不存在。"
-    fi
-
-    rm -f "$pid_file"
-    echo "✅ 專案 '${name}' 的哨兵已停止。"
+    echo "--- 正在停止哨兵 ---"
+    echo "功能待實現..."
     read -n 1 -s -r -p "按任意鍵返回主菜單..."
 }
 
@@ -312,6 +252,7 @@ stop_sentry() {
 # ==============================================================================
 #  主執行區 (v4.0 智慧調度版)
 # ==============================================================================
+
 main_loop() {
     while true; do
         show_main_menu
@@ -321,6 +262,7 @@ main_loop() {
             2) add_project;;
             3) edit_project;;
             4) delete_project;;
+            # 【新功能】為哨兵新增菜單選項
             5) start_sentry;;
             6) stop_sentry;;
             u|U) manual_update;;
@@ -330,8 +272,14 @@ main_loop() {
     done
 }
 
+# 【核心改造】我們檢查傳給腳本的第一個參數 ($1)
+# -z "$1" 的意思是，如果第一個參數是空的 (null or empty string)
 if [ -z "${1-}" ]; then
+    # 如果沒有提供任何參數，就跟以前一樣，啟動互動式主循環
     main_loop
 else
+    # 如果提供了參數 (例如 "start_sentry")，就直接把這個參數當作函式名來執行
+    # "$@" 會把所有傳入的參數 (例如 start_sentry arg1 arg2) 都傳遞給要執行的函式
     "$1"
 fi
+

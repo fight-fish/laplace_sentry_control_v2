@@ -1,10 +1,8 @@
 [
-    {
-    "uuid": "laplace-sentry-control-v2-self",
-    "name": "laplace_sentry_control_v2 (self-monitoring)",
-    "path": ".",
-    "md_file": "./README.md",
-    "status": "stopped",
-    "pid": null
-    }
+  {
+    "uuid": "48102a50-2724-4d5d-b229-d58c45259238",
+    "name": "test",
+    "path": "\\\\wsl.localhost\\Ubuntu\\home\\serpal\\My_Python_Projects\\laplace_sentry_control_v2\\test_scaffold",
+    "md_file": "\\\\wsl.localhost\\Ubuntu\\home\\serpal\\My_Python_Projects\\laplace_sentry_control_v2\\test_scaffold\\README.md"
+  }
 ]
