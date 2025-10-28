@@ -86,6 +86,7 @@
 - **指令：**
   ```bash
   pkill -f "inotifywait" || true && rm -f /tmp/sentry_*.pid && rm -f logs/sentry_*.log
+  killall inotifywait
   ```
 
 #### 實時查看日誌

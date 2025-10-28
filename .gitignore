@@ -1,14 +1,12 @@
-# 忽略所有日誌文件和目錄
-/logs/
-*.log
+# Python
+__pycache__/
+*.pyc
 
-# 忽略所有備份和存檔目錄
-/_archive/
+# Runtime State
+logs/*.log
+logs/*.lock
+!logs/.gitkeep
 
-# 忽略測試腳手架中生成的臨時文件
-/test_scaffold/*
-# 但不要忽略腳手架本身存在的證明文件
-!/test_scaffold/README.md
-
-# 忽略個人的、非核心的 Markdown 文件
-三版分析.md
+# OS-specific
+.DS_Store
+Thumbs.db

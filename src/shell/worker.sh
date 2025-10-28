@@ -51,6 +51,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 ENGINE_SCRIPT_PATH="${SCRIPT_DIR}/../core/engine.py"
 PATH_SCRIPT_PATH="${SCRIPT_DIR}/../core/path.py"
 FORMATTER_SCRIPT_PATH="${SCRIPT_DIR}/../core/formatter.py"
+LOCK_FILE="${SCRIPT_DIR}/../../logs/.worker.lock"
 
 # --- 核心改造：從標準輸入讀取【完整的、原始的】舊內容 ---
 full_old_content=$(cat)
@@ -58,6 +59,10 @@ full_old_content=$(cat)
 # ==============================================================================
 #  核心更新流程 (終極版)
 # ==============================================================================
+(
+# 在執行任何操作前，先嘗試獲取鎖
+flock -n 200 || { echo "【工人】獲取鎖失敗，另一個實例正在運行。優化性退出。" >&2; exit 0; }
+
 echo "--- [工人] 開始執行更新 (終極版) ---"
 echo "  - 監控目標: ${PROJECT_PATH}"
 echo "  - 輸出文件: ${TARGET_DOC_PATH}"
@@ -102,5 +107,9 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "--- [工人] 更新成功完成！ ---"
+
+
+) 200>"$LOCK_FILE"
+
 exit 0
 

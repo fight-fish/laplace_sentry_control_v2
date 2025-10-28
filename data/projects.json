@@ -1,14 +1,1 @@
-[
-  {
-    "uuid": "48102a50-2724-4d5d-b229-d58c45259238",
-    "name": "test",
-    "path": "\\\\wsl.localhost\\Ubuntu\\home\\serpal\\My_Python_Projects\\laplace_sentry_control_v2\\test_scaffold",
-    "md_file": "\\\\wsl.localhost\\Ubuntu\\home\\serpal\\My_Python_Projects\\laplace_sentry_control_v2\\test_scaffold\\README.md"
-  },
-  {
-    "uuid": "fb2b19d9-e202-46c3-9310-594d149b773f",
-    "name": "sentry_itself",
-    "path": "\\\\wsl.localhost\\Ubuntu\\home\\serpal\\My_Python_Projects\\laplace_sentry_control_v2",
-    "md_file": "D:\\Obsidian_Vaults\\Laplace_Notes\\MP_X_CORE\\8 草案種子庫\\思考漩渦\\個人偏好與協作模式\\📁 帕爾的專注養成本-AI自我重建計畫\\進行中的專案\\目錄自動更新專案\\通用目錄哨兵控制中心(測試版).md"
-  }
-]
+[]
