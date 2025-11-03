@@ -15,21 +15,21 @@ import re
 def normalize_path(path_str):
     """
     將各種平台、各種格式的原始路徑字串，標準化為統一的、在 WSL 中可用的 Linux 路徑格式。
-    【v2.1 終極剝離版】
+    【v2.4 穩定版】—— 支援 //wsl.localhost 與 /wsl.localhost 兩種格式
     """
     if not isinstance(path_str, str):
         return ""
     
-    # 【終極加固】使用一個 while 循環，來反复、徹底地剝離任何可能存在的多層引號
     p = path_str.strip()
     while p.startswith(('"', "'")) and p.endswith(('"', "'")):
         p = p[1:-1].strip()
     
     p = p.replace("\\", "/")
     
-    match_wsl = re.search(r"//wsl\.localhost/[^/]+/(.*)", p, re.IGNORECASE)
+    # ✅ 同時匹配一或兩個斜線開頭的 wsl.localhost
+    match_wsl = re.match(r"^/{1,2}wsl\.localhost/([^/]+)/(.*)", p, re.IGNORECASE)
     if match_wsl:
-        p = "/" + match_wsl.group(1)
+        p = "/" + match_wsl.group(2)
         
     match_drive = re.match(r"([A-Za-z]):/(.*)", p)
     if match_drive:
@@ -41,6 +41,24 @@ def normalize_path(path_str):
     return p
 
 
+
+# 在 src/core/path.py 中，normalize_path 函式的下方
+
+# 我們用「def」來 定義（define）一個新的、可以被其他 Python 腳本導入的函式。
+# 它的任務是：檢查傳入的路徑列表是否都真實存在。
+def validate_paths_exist(paths_to_check):
+    """
+    這是一個可導入的函式，檢查路徑列表是否存在。
+    它會直接返回 True (代表全部存在) 或 False (代表至少有一個不存在)。
+    """
+    # 我們用「for...in...」這個結構，來一個一個地檢查傳入的「路徑列表（paths_to_check）」。
+    for path in paths_to_check:
+        # 我們用「os.path.exists()」來判斷，如果（if not）這個路徑「不存在（exists）」...
+        if not os.path.exists(path):
+            # 就立刻返回（return）一個代表「失敗」的布林值 False。
+            return False
+    # 如果循環順利跑完（代表所有路徑都存在），就返回（return）一個代表「成功」的布林值 True。
+    return True
 
 
 #  -----------------------------------------------------------------------
@@ -90,17 +108,17 @@ def handle_write(filepath):
         sys.exit(3)
 
 
+
 # 我們用「def」來 定義（define）一個專門處理「驗證」命令的函式。
 def handle_validate(paths):
-    # 我們用「for...in...」這個結構，來一個一個地處理傳入的「路徑列表（paths）」。
-    for path_to_check in paths:
-        # 我們用「os.path.exists()」來判斷，如果（if not）這個路徑「不存在（exists）」...
-        if not os.path.exists(path_to_check):
-            print(f"【尋路專家錯誤】：路徑不存在！\n  -> {path_to_check}", file=sys.stderr)
-            # 只要有一個路徑不存在，就立刻失敗並退出。
-            sys.exit(2)
-    # 如果循環順利跑完（代表所有路徑都存在），就成功退出。
+    # 【改造點】這個為命令行服務的函式，現在去呼叫（call）我們剛剛創建的新函式。
+    if not validate_paths_exist(paths):
+        # 如果（if not）新函式返回了 False，我們就在這裡打印錯誤訊息，並帶著退出碼「2」退出。
+        print(f"【尋路專家錯誤】：一個或多個路徑不存在或無效。", file=sys.stderr)
+        sys.exit(2)
+    # 如果新函式返回了 True，我們就什麼都不打印，並帶著退出碼「0」（代表成功）安靜地退出。
     sys.exit(0)
+
 
 
 # --- 主執行區：命令列介面設定 ---

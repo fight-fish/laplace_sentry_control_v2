@@ -69,7 +69,7 @@ def _generate_tree(root_path, folder_spacing=0, max_depth=None):
         if max_depth is not None and depth >= max_depth:
             return
 
-        exclude_dirs = {".git", "__pycache__", "test_scaffold"}
+        exclude_dirs = {".git", "__pycache__", "test_scaffold", "_archive"}
         try:
             items = [name for name in os.listdir(directory) if name not in exclude_dirs]
         except FileNotFoundError:
