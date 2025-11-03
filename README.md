@@ -229,44 +229,34 @@ python3 main.py
 <!-- AUTO_TREE_START -->
 ```
 laplace_sentry_control_v2/
-├── data/                       # TODO: Add comment here
-│   └── projects.json           # TODO: Add comment here
-├── logs/                       # TODO: Add comment here
-│   ├── .gitkeep                # TODO: Add comment here
-│   └── .worker.lock            # TODO: Add comment here
-├── src/                        # TODO: Add comment here
-│   ├── core/                   # TODO: Add comment here
-│   │   ├── __init__.py         # TODO: Add comment here
-│   │   ├── daemon.py           # TODO: Add comment here
-│   │   ├── engine.py           # TODO: Add comment here
-│   │   ├── formatter.py        # TODO: Add comment here
-│   │   └── path.py             # TODO: Add comment here
-│   └── shell/                  # TODO: Add comment here
-│       └── worker.sh           # TODO: Add comment here
-├── tests/                      # TODO: Add comment here
-│   ├── test_add_project.sh     # TODO: Add comment here
-│   ├── test_add_project_v2.sh  # TODO: Add comment here
-│   ├── test_edit_delete.py     # TODO: Add comment here
-│   ├── test_list_projects.sh   # TODO: Add comment here
-│   ├── test_ping_pong.sh       # TODO: Add comment here
-│   ├── tests_readme.md         # TODO: Add comment here
-│   ├── verify.sh               # TODO: Add comment here
-│   ├── verify_flock.sh         # TODO: Add comment here
-│   └── verify_path.sh          # TODO: Add comment here
-├── tests copy/                 # TODO: Add comment here
-│   ├── test_add_project.sh     # TODO: Add comment here
-│   ├── test_add_project_v2.sh  # TODO: Add comment here
-│   ├── test_edit_delete.py     # TODO: Add comment here
-│   ├── test_list_projects.sh   # TODO: Add comment here
-│   ├── test_ping_pong.sh       # TODO: Add comment here
-│   ├── tests_readme.md         # TODO: Add comment here
-│   ├── verify.sh               # TODO: Add comment here
-│   ├── verify_flock.sh         # TODO: Add comment here
-│   └── verify_path.sh          # TODO: Add comment here
-├── .gitignore                  # TODO: Add comment here
-├── PROTOCOL.md                 # TODO: Add comment here
-├── README.md                   # TODO: Add comment here
-├── main.py                     # TODO: Add comment here
-└── releases.md                 # TODO: Add comment here
+├── data/                       # 【數據區】存放專案運行所需的持久化資料。
+│   └── projects.json           # 【專案名單】以 JSON 格式記錄所有受監控專案與設定。
+├── logs/                       # 【日誌區】存放哨兵運行時產生的暫存檔與鎖定檔。
+│   ├── .gitkeep                # 讓 Git 保留此空資料夾的佔位符。
+│   └── .worker.lock            # 【鎖定檔】由 worker.sh 使用 flock 機制產生，用來防止重複啟動工人進程。
+├── src/                        # 【源碼區】存放專案的主要程式碼。
+│   ├── core/                   # 【核心模組】可獨立執行的 Python 模組（專家層）。
+│   │   ├── __init__.py         # 標記此資料夾為 Python 套件，供其他模組導入使用。
+│   │   ├── daemon.py           # 【守護進程（指揮官）】負責調度工人、處理專案清單與手動更新。
+│   │   ├── engine.py           # 【結構專家】生成目錄結構樹並合併註解。
+│   │   ├── formatter.py        # 【格式化專家】負責將結構輸出包裝成 Markdown 代碼塊。
+│   │   └── path.py             # 【路徑專家】執行跨平台路徑轉換與檔案 I/O 操作。
+│   └── shell/                  # 【Shell 腳本層】負責流程控制與背景操作。
+│       └── worker.sh           # 【工人腳本】執行實際更新任務（由 daemon 呼叫）。
+├── tests/                      # 【自動化測試區】存放各模組的單元與整合測試腳本。
+│   ├── test_add_project.sh     # 測試「新增專案」功能是否正常。
+│   ├── test_add_project_v2.sh  # 測試「新增專案」進階版本（含輸入驗證）。
+│   ├── test_edit_delete.py     # 測試專案「修改與刪除」功能。
+│   ├── test_list_projects.sh   # 測試「列出專案清單」功能。
+│   ├── test_ping_pong.sh       # 測試「指揮官 ↔ 工人」通信是否成功。
+│   ├── tests_readme.md         # 測試說明文件，解釋每個測試腳本的用途。
+│   ├── verify.sh               # 綜合測試指令腳本，快速驗證主要模組功能。
+│   ├── verify_flock.sh         # 測試 flock 機制是否能防止多重 worker 同時運行。
+│   └── verify_path.sh          # 測試 path.py 路徑解析功能是否正確。
+├── .gitignore                  # Git 忽略規則，排除不需版本控制的檔案（如暫存、log）。
+├── PROTOCOL.md                 # 【專案通訊協定書】描述系統模組間的資料流與調用規範。
+├── README.md                   # 【使用說明書】專案整體介紹與操作指令。
+├── main.py                     # 【主控台入口】使用者與系統互動的主菜單介面。
+└── releases.md                 # 【版本紀錄】列出每次發佈的版本變更摘要與更新說明。
 ```
 <!-- AUTO_TREE_END -->
