@@ -1,139 +1,102 @@
-好的，這份 `PROTOCOL.md` 是我們專案的「法律文件」，修改它需要非常嚴謹。
+# **專案通訊協定書 v3.0 (I/O 網關版)**
 
-根據我們達成的 `output_file` 共識，以及對未來 `target_files` 的規劃，我為您準備了一份**完整、精確**的修改方案。
-
-請用以下內容，**完整替換**您現有的 `PROTOCOL.md` 文件：
-
-```markdown
-# Laplace Sentry Control - 通信協議 (v2.0)
-
-**版本說明:** 
-- v1.x: 舊版協議，使用 md_file 和 target_files 命名。
-- v2.0: **命名升級**。引入 `output_file` 作為單文件模式下的權威欄位，並明確 `target_files` 為未來多文件模式的預留欄位。
+**文件 ID:** `LAPLACE-SENTRY-PROTOCOL-V3.0`
+**狀態:** `生效中`
+**核心原則:** 本文件是專案內部所有 Python 模組間通信的**唯一真理來源**。所有內部 API、數據流和異常處理，都必須嚴格遵循此處的定義。
 
 ---
 
-## 模板：新指令格式 (Template)
+## **第一章：全局規則與定義**
 
-> **說明：** 所有新指令的文檔，都必須嚴格遵循此模板結構。
+### **1.1 內部 API 設計原則**
 
+-   **異常驅動 (Exception-Driven):** 模組間的錯誤傳遞，**必須**通過拋出具體的異常（如 `ValueError`, `IOError`）來實現。成功時，函式可以返回數據或隱式返回 `None`。
+-   **類型提示 (Type Hinting):** 所有函式的參數和返回值，**必須**提供清晰的類型提示，以確保程式碼的健壯性和可維護性。
+-   **依賴注入 (Dependency Injection):** 核心業務邏輯函式（如 `daemon.py` 中的 `handle_...` 系列），應允許通過可選參數傳入其依賴項（如 `projects_data`），以實現可測試性。
+
+### **1.2 數據持久化**
+
+-   所有對文件系統的**讀寫操作**，**必須**通過 `io_gateway.py` 提供的 `safe_read_modify_write` 函式進行，以確保操作的原子性和線程安全。
+
+---
+
+## **第二章：C/S 通信契約 (Client-Server Contract)**
+
+本章定義了前端 (`main.py`) 與後端 (`daemon.py` 的 `main_dispatcher`) 之間的命令行風格指令。這一層的契約保持不變，以確保向後兼容。
+
+| 指令 (Command) | 參數 (Arguments) | 描述 | 成功響應 (stdout) |
+| :--- | :--- | :--- | :--- |
+| `ping` | (無) | 檢測後端服務是否可達。 | `PONG` |
+| `list_projects` | (無) | 獲取所有已註冊專案的列表。 | `[ { ... }, ... ]` (JSON) |
+| `add_project` | `name` `path` `output_file` | 新增一個專案。 | `OK` |
+| `edit_project` | `uuid` `field` `new_value` | 修改一個現有專案。 | `OK` |
+| `delete_project` | `uuid` | 刪除一個指定的專案。 | `OK` |
+| `manual_update` | `uuid` | 手動觸發一次指定專案的更新。 | `OK` |
+| `manual_direct` | `project_path` `target_doc` | 直接對指定路徑執行一次更新。 | `OK` |
+
+---
+
+## **第三章：核心工作流契約 (Core Workflow Contract)**
+
+### **3.1 數據流示意圖 (Python-Native)**
+
+```mermaid
+graph TD
+    subgraph "daemon.py (指揮官)"
+        A[handle_... 函式] -- 發起 I/O 請求 --> B(io_gateway.py);
+        B -- "傳入 file_path 和 update_callback" --> C{safe_read_modify_write};
+        A -- 發起更新請求 --> D[統一更新入口];
+        D -- "傳入 project_path, target_doc" --> E[worker.py];
+    end
+
+    subgraph "io_gateway.py (I/O 網關)"
+        C -- 在鎖內執行 --> F[1. 讀取文件];
+        F -- 傳入舊數據 --> G[2. 執行 update_callback];
+        G -- 返回新數據 --> H[3. 寫入文件];
+    end
+
+    subgraph "worker.py (工人)"
+        E -- "傳入 project_path, old_content" --> I[engine.py];
+        I -- 返回 raw_material --> J[formatter.py];
+        J -- 返回 finished_product --> E;
+    end
+
+    style B fill:#cde,stroke:#333,stroke-width:2px
+    style C fill:#cde,stroke:#333,stroke-width:2px
 ```
-### X. `指令名稱 <參數1> <參數2>`
-    
-- **指令:** `指令名稱`
-- **方向:** 客戶端 -> 服務器
-- **描述:** [用一句話清晰地描述這個指令的意圖和作用。]
-- **參數 (可選):**
-  - `<參數1>`: [參數的描述 (類型)]。
-  - `<參數2>`: [參數的描述 (類型)]。
-- **成功響應 (stdout):**
-  - [描述成功時，服務器必須返回的確切內容。]
-- **失敗響應 (stderr):**
-  - `ERROR: [第一種可能的錯誤信息]` ([中文註解])
-  - `ERROR: [第二種可能的錯誤信息]` ([中文註解])
-```
+
+### **3.2 `io_gateway.py` (I/O 網關)**
+
+-   **職責：** 系統**唯一**的、**安全**的 I/O 事務處理中心。
+-   **核心 API：`safe_read_modify_write(file_path, update_callback, serializer)`**
+    -   **事務模型：** 該函式接收一個「回調函式」(`update_callback`)。它會在獲取文件鎖後，原子性地執行「讀取 -> 將數據傳給回調函式 -> 獲取新數據 -> 寫入」的完整事務。
+    -   **副作用：** 讀取和覆寫文件系統。
+    -   **異常 (`raise`):**
+        -   `IOError`: 當發生任何文件操作錯誤（如權限不足、磁盤已滿）或鎖獲取失敗時拋出。
+        -   `json.JSONDecodeError`: 當 `serializer` 為 `json` 且文件內容損壞時，由內部處理，並向回調函式傳遞空列表 `[]`。
+
+### **3.3 `worker.py` (工人專家)**
+
+-   **職責：** 調度 `engine.py` 和 `formatter.py`，完成一次完整的「內容生成」流水線。
+-   **核心 API：`execute_update_workflow(project_path, target_doc, old_content)`**
+    -   **數據流：** 通過**函式參數**和 `return` 值進行數據傳遞。
+    -   **副作用：** 無（純數據處理，不接觸文件系統）。
+    -   **返回值：** `(exit_code, result_string)` 元組。`exit_code` 為 `0` 代表成功，非 `0` 代表失敗。`result_string` 在成功時是生成的內容，失敗時是錯誤信息。
+
+### **3.4 `engine.py` & `formatter.py` (生產線專家)**
+
+-   **職責：** 保持不變，分別負責「生產原材料」和「包裝成品」。
+-   **調用方式：** 由 `worker.py` 通過**內部函式調用**來使用，不再作為獨立的 `subprocess` 腳本。
 
 ---
 
-## 數據模型與全局原則 (v2.0 命名升級版)
+## **第四章：Sentry 監控契約 (待實現)**
 
-- **數據模型:** 
-  - **當前 (單文件模式):** 權威欄位是 `"output_file": "/path/to/your/file.ext"` (字串)。
-  - **未來 (多文件模式):** 權威欄位將是 `"target_files": ["/path/to/file1.ext", "/path/to/file2.ext"]` (陣列)。
-  - **兼容策略:** 當前所有寫入操作，必須同時維護 `output_file` (字串) 和 `target_files` (單元素陣列)，以確保平滑過渡。
-- **失敗策略:** 所有專家與工作流必須遵循「快速失敗 (Fail-Fast)」原則。任何可預期的錯誤都必須立即中止操作並返回非零退出碼。
-
----
-
-## 基礎指令
-
-### 1. `ping`
-
-- **指令:** `ping`
-- **方向:** 客戶端 -> 服務器
-- **描述:** 用於檢測與服務器的連接是否暢通。
-- **成功響應 (stdout):** 服務器必須返回一個由單詞 `PONG` 和一個換行符組成的字串。
-
-### 2. `list_projects`
-
-- **指令:** `list_projects`
-- **方向:** 客戶端 -> 服務器
-- **描述:** 請求服務器返回當前所有已註冊專案的完整列表。
-- **成功響應 (stdout):** 服務器必須返回 `data/projects.json` 文件的原始 JSON 內容。如果文件不存在或為空，應返回一個空的 JSON 陣列 `[]`。
-
----
-
-## 名單管理指令
-
-### 3. `add_project <name> <path> <output_file>`
-
-- **指令:** `add_project`
-- **方向:** 客戶端 -> 服務器
-- **描述:** 指示服務器新增一個專案。所有參數都必須提供。
-- **參數:**
-  - `<name>`: 專案的唯一別名 (字串)。
-  - `<path>`: 要監控的專案目錄的絕對路徑 (字串)。
-  - **`<output_file>`**: 要更新的單個輸出文件的絕對路徑 (字串)。
-- **成功響應 (stdout):**
-  - 服務器必須返回單詞 `OK` 和一個換行符。
-- **失敗響應 (stderr):**
-  - `【新增失敗】：...` (及其他後端驗證錯誤)
-
-### 4. `edit_project <uuid> <field> <new_value>`
-
-- **指令:** `edit_project`
-- **方向:** 客戶端 -> 服務器
-- **描述:** 指示服務器修改指定專案的某個欄位值。
-- **參數:**
-  - `<uuid>`: 要修改的專案的唯一標識符 (字串)。
-  - `<field>`: 要修改的欄位名稱，必須是 `name`, `path`, 或 **`output_file`** 之一 (字串)。
-  - `<new_value>`: 要設置的新值 (字串)。
-- **成功響應 (stdout):**
-  - 服務器必須返回單詞 `OK` 和一個換行符。
-- **失敗響應 (stderr):**
-  - `【編輯失敗】：未找到具有該 UUID 的專案。`
-  - `【編輯失敗】：無效的欄位名稱。只能修改 'name', 'path', 或 'output_file'。`
-  - (及其他後端驗證錯誤)
-
-### 5. `delete_project <uuid>`
-
-- **指令:** `delete_project`
-- **方向:** 客戶端 -> 服務器
-- **描述:** 指示服務器刪除一個指定的專案。
-- **參數:**
-  - `<uuid>`: 要刪除的專案的唯一標識符 (字串)。
-- **成功響應 (stdout):**
-  - 服務器必須返回單詞 `OK` 和一個換行符。
-- **失敗響應 (stderr):**
-  - `【刪除失敗】：未找到具有該 UUID 的專案。`
-
----
-
-## 手動觸發指令
-
-### 6. `manual_update <uuid>`
-
-- **指令:** `manual_update`
-- **方向:** 客戶端 -> 服務器
-- **描述:** 指示服務器對指定專案，執行一次完整的手動更新工作流。
-- **參數:**
-  - `<uuid>`: 要更新的專案的唯一標識符 (字串)。
-- **成功響應 (stdout):**
-  - 服務器在執行過程中，會將日誌實時打印到標準輸出。最終以退出碼 `0` 結束。
-- **失敗響應 (stderr):**
-  - `【手動更新失敗】：...` (及其他後端執行錯誤)
-
-### 7. `manual_direct <project_path> <output_file>`
-
-- **指令:** `manual_direct`
-- **方向:** 客戶端 -> 服務器
-- **描述:** 指示服務器繞開專案名單，直接對指定的路徑執行一次更新。
-- **參數:**
-  - `<project_path>`: 要掃描的專案目錄的絕對路徑 (字串)。
-  - `<output_file>`: 要寫入的輸出文件的絕對路徑 (字串)。
-- **成功響應 (stdout):**
-  - 服務器在執行過程中，會將日誌實時打印到標準輸出。最終以退出碼 `0` 結束。
-- **失敗響應 (stderr):**
-  - `【手動更新失敗】：...` (及其他後端執行錯誤)
-```
+-   **`start_sentry <uuid>`**
+    -   **描述：** 啟動哨兵監控指定專案。
+    -   **行為：** 在 `daemon.py` 中創建一個長期存活的 `subprocess.Popen` 進程，運行 `inotifywait`。該進程的輸出將被 `daemon.py` 監聽，並在檢測到文件變動時，觸發對 `_run_single_update_workflow()` 的**內部調用**。
+    -   **副作用：** 在系統中產生一個背景進程，並在 `daemon.py` 的內存中記錄其 PID。
+-   **`stop_sentry <uuid>`**
+    -   **描述：** 根據 UUID 終止該哨兵進程。
+    -   **副作用：** 終止背景進程，釋放系統資源，更新 `daemon.py` 內存中的狀態。
 

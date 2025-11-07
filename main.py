@@ -1,291 +1,267 @@
-# main.py (位於專案根目錄) - 註解重構版
+# main.py - 【v5.2 UX 終極優化版】
 
-# HACK: 為了讓這個客戶端能獨立運行，我們需要導入一些 Python 內建的標準工具。
-# 在未來的純 Python 工作流中，subprocess 將會被移除。
-import os
 import sys
-import time
+import os
 import json
-from io import StringIO
-import subprocess
+# 【承諾 1: 完整導入】一次性導入所有需要的類型，杜絕 "未定義" 錯誤。
+from typing import Optional, Tuple, List, Dict, Any
 
-# HACK: 這是解決 Python 中「模組找不到錯誤 (ModuleNotFoundError)」的經典技巧。
-# 我們手動將專案的根目錄（project_root）加到系統的「尋找路徑（sys.path）」中，
-# 這樣不論我們從哪裡執行這個腳本，它總能找到 src/core/ 下的模組。
-project_root = os.path.abspath(os.path.dirname(__file__))
+# HACK: 解決模組導入問題的經典技巧
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__)))
 sys.path.insert(0, project_root)
 
-# 我們從源碼（src）的核心（core）中，導入（import）我們唯一的依賴：後端大腦（daemon）。
+# 從後端導入我們唯一的依賴：daemon
 from src.core import daemon
 
-# --- 輔助顯示函式 (Helper Functions for Display) ---
+# --- 前端專用輔助函式 ---
 
-def clear_screen():
-    """一個用來清空終端機畫面的小工具。"""
-    # 我們用 os.system 來執行系統命令。如果（if）作業系統是 'nt' (Windows)...
-    if os.name == 'nt':
-        # ...就執行 'cls' 命令。
-        os.system('cls')
-    # 否則（else），就執行 'clear' 命令 (適用於 Linux, macOS)。
-    else:
-        os.system('clear')
+def _call_daemon_and_get_output(command_and_args: List[str]) -> Tuple[int, str]:
+    """一個特殊的、只用於獲取後端輸出的內部函式。"""
+    from io import StringIO
+    import contextlib
 
-def show_main_menu():
-    """定義（define）一個專門用來顯示主菜單的函式。"""
-    clear_screen()
-    print("========================================")
-    print("   通用目錄哨兵 - 控制中心 v4.0 (命名升級版)")
-    print("========================================")
-    print("  [1] 列出所有專案")
-    print("  [2] 新增一個專案")
-    print("  [3] 修改一個專案")
-    print("  [4] 刪除一個專案")
-    print("  ------------------------------------")
-    # 根據日誌 035 的教訓，這裡的描述必須清晰地區分兩種模式。
-    print("  [u]  手動更新 (根據名單選擇專案)")
-    print("  [u2] 手動更新 (自由輸入路徑)")
-    print("  ------------------------------------")
-    print("  [q] 退出系統")
-    print("========================================")
-
-# --- 數據獲取與交互輔助函式 (Data Fetching & Interaction Helpers) ---
-
-def _get_projects_from_daemon():
-    """
-    一個專門負責從後端（daemon）獲取專案列表的內部函式。
-    它會捕獲後端的輸出，並將其從 JSON 字串轉換為 Python 的列表。
-    """
-    # DEFENSE: 為了捕獲 daemon.py 中所有的打印（print）輸出，我們暫時「綁架」了系統的標準輸出（sys.stdout）。
-    # 這是個高級技巧，但也容易出錯，所以我們用「try...finally」結構來確保無論如何都能恢復它。
+    temp_stdout = StringIO()
+    exit_code = -1
     try:
-        old_stdout = sys.stdout
-        # 我們創建一個內存中的文字緩衝區（StringIO），並讓所有後續的 print 內容都寫入這裡。
-        sys.stdout = captured_output = StringIO()
-        # 我們調用（call）後端的「處理列出專案（handle_list_projects）」函式。
-        daemon.handle_list_projects()
-    # DEFENSE: 我們預期 daemon 函式在執行完後會用 sys.exit() 退出，這會觸發 SystemExit 異常。
-    # 我們在這裡把它「接住」並忽略（pass），這是為了讓我們的「綁架」流程能繼續下去。
-    except SystemExit:
-        pass
-    # DEFENSE: 捕獲所有其他可能的意外錯誤。
+        with contextlib.redirect_stdout(temp_stdout):
+            exit_code = daemon.main_dispatcher(command_and_args)
     except Exception as e:
-        # 在報錯前，必須先恢復標準輸出，否則錯誤訊息也會被「綁架」。
-        sys.stdout = old_stdout
-        print(f"\n【致命錯誤】：在與後台服務通信時發生意外！\n  -> {e}")
-        return None
-    finally:
-        # 「finally」確保這段程式碼無論如何都會被執行，保證我們能「釋放人質」。
-        sys.stdout = old_stdout
+        print(f"\n[前端致命錯誤]：調用後端時發生意外崩潰！\n  -> 原因: {e}", file=sys.stderr)
+        return (99, "")
+        
+    output = temp_stdout.getvalue()
+    return (exit_code, output)
 
-    # 我們從緩衝區中獲取被捕獲的全部文字內容。
-    json_string = captured_output.getvalue()
-    # DEFENSE: 後端服務有時可能返回非預期的內容（如錯誤訊息），這會導致 JSON 解析失敗。
+# 位於 main.py
+
+def _call_daemon_and_show_feedback(command_and_args: List[str]) -> bool:
+    """一個通用的、負責與後端交互並向用戶顯示回饋的函式。"""
+    print("\n[前端]：正在向後端發送指令...")
+    
+    # TAG: ADHOC-001 - 優雅失敗
+    # 我們將 daemon 的調用也包裹在 try...except 中，以捕獲它可能拋出的異常
     try:
-        # 我們嘗試用 json.loads 將文字解析成 Python 物件。
-        return json.loads(json_string)
+        from io import StringIO
+        import contextlib
+
+        temp_stdout = StringIO()
+        temp_stderr = StringIO() # 我們也捕獲 stderr
+        exit_code = -1
+
+        # 使用 contextlib.redirect_stdout/stderr 來捕獲所有輸出
+        with contextlib.redirect_stdout(temp_stdout), contextlib.redirect_stderr(temp_stderr):
+            exit_code = daemon.main_dispatcher(command_and_args)
+        
+        output = temp_stdout.getvalue()
+        error_output = temp_stderr.getvalue()
+
+        if exit_code == 0:
+            print("\033[92m[✓] 操作成功\033[0m") 
+            if output.strip() and output.strip() != "OK":
+                if command_and_args[0] != 'list_projects':
+                    print("--- 後端返回信息 ---\n" + output)
+            return True
+        else:
+            # 如果後端返回非零退出碼，我們優先顯示它自己的 stderr 報告
+            print(f"\033[91m[✗] 操作失敗 (退出碼: {exit_code})\033[0m")
+            if error_output.strip():
+                print("--- 後端錯誤報告 ---\n" + error_output.strip())
+            else:
+                print("--- 後端未提供額外錯誤信息 ---")
+            return False
+
+    except (json.JSONDecodeError, IOError) as e:
+        # 針對 I/O 和 JSON 損壞的特定錯誤，給出更清晰的引導
+        print(f"\033[91m[✗] 操作失敗：發生嚴重的 I/O 或數據文件錯誤。\033[0m")
+        print("--- 錯誤詳情 ---")
+        print(str(e))
+        print("\n建議：請檢查 'data/projects.json' 文件是否存在或內容是否損壞。")
+        return False
+    except Exception as e:
+        # 通用安全氣囊保持不變
+        print(f"\n[前端致命錯誤]：調用後端時發生意外崩潰！\n  -> 原因: {e}", file=sys.stderr)
+        return False
+
+
+def _select_project(operation_name: str) -> Optional[Dict[str, Any]]:
+    """【UX 核心】列出表格化的專案，讓用戶通過數字選擇。"""
+    print(f"\n--- {operation_name} ---")
+    exit_code, projects_json_str = _call_daemon_and_get_output(['list_projects'])
+    
+    if exit_code != 0:
+        print("[前端]：獲取專案列表失敗！")
+        return None
+
+    try:
+        projects = json.loads(projects_json_str)
+        if not projects:
+            print("目前沒有任何已註冊的專案。")
+            return None
     except json.JSONDecodeError:
-        print(f"\n【致命錯誤】：後台服務返回的數據格式不正確。\n  -> 收到的原始數據: {json_string}")
+        print("[前端]：解析後端返回的專案列表時出錯！")
         return None
 
-def select_project_from_list(projects):
-    """打印專案列表，並讓使用者通過輸入編號來選擇一個專案。"""
-    # DEFENSE: 如果傳入的列表是空的，就直接告知用戶並返回。
-    if not projects:
-        print("目前沒有任何已註冊的專案。")
-        return None
-
-    print("\n編號 | 專案別名             | UUID")
-    print("-----|----------------------|---------------------------------------")
-    # 我們用「for...in...」這個結構，配合 enumerate 來一個個地處理「專案列表（projects）」。
-    for i, p in enumerate(projects, 1):
-        # 使用 f-string 和格式化語法，讓輸出像表格一樣對齊。
-        print(f"{i:<4} | {p.get('name', 'N/A'):<20} | {p.get('uuid', 'N/A')}")
-    print("-----------------------------------------------------------------")
-
-    # 我們用一個「while True」無限循環，來不斷要求用戶輸入，直到得到有效值。
+    # --- 表格化顯示邏輯 ---
+    headers = {"no": "編號", "name": "專案別名", "uuid": "UUID"}
+    widths = {key: len(title) for key, title in headers.items()}
+    for i, p in enumerate(projects):
+        widths['no'] = max(widths['no'], len(str(i + 1)))
+        widths['name'] = max(widths['name'], len(p.get('name', '')))
+        widths['uuid'] = max(widths['uuid'], len(p.get('uuid', '')))
+    header_line = (f"  {headers['no']:<{widths['no']}}  "
+                f"| {headers['name']:<{widths['name']}}  "
+                f"| {headers['uuid']:<{widths['uuid']}}")
+    print(header_line)
+    print("-" * len(header_line))
+    for i, p in enumerate(projects):
+        row_line = (f"  {str(i + 1):<{widths['no']}}  "
+                    f"| {p.get('name', ''):<{widths['name']}}  "
+                    f"| {p.get('uuid', ''):<{widths['uuid']}}")
+        print(row_line)
+    # --- 表格化顯示結束 ---
+    
     while True:
-        # DEFENSE: 使用 try...except 來處理用戶可能輸入非數字的情況。
         try:
-            choice = input("請輸入您想操作的專案編號 (或直接按 Enter 取消): ")
-            # 如果用戶直接按 Enter，就取消操作。
-            if not choice:
-                print("\n操作已取消。")
-                return None
-            # 將輸入的文字轉換為整數，並減 1 得到索引。
-            choice_index = int(choice) - 1
-            # 判斷索引是否在有效範圍內。
-            if 0 <= choice_index < len(projects):
-                # 如果有效，就返回被選中的那個專案物件。
-                return projects[choice_index]
+            choice_str = input("\n請輸入要操作的專案編號 (或按 Enter 取消) > ").strip()
+            if not choice_str: return None
+            choice_idx = int(choice_str) - 1
+            if 0 <= choice_idx < len(projects):
+                return projects[choice_idx]
             else:
                 print("無效的編號，請重新輸入。")
-        except ValueError:
-            print("輸入無效，請輸入數字。")
+        except (ValueError, IndexError):
+            print("輸入無效，請輸入列表中的數字編號。")
 
-# --- 主循環與菜單邏輯 (Main Loop & Menu Logic) ---
+def _select_field_to_edit() -> Optional[str]:
+    """【UX 核心】讓用戶通過數字選擇要修改的欄位。"""
+    print("\n--- 請選擇要修改的欄位 ---")
+    fields = ['name', 'path', 'output_file']
+    for i, field in enumerate(fields):
+        print(f"  [{i + 1}] {field}")
+    
+    while True:
+        try:
+            choice_str = input("\n請輸入欄位編號 (或按 Enter 取消) > ").strip()
+            if not choice_str: return None
+            choice_idx = int(choice_str) - 1
+            if 0 <= choice_idx < len(fields):
+                return fields[choice_idx]
+            else:
+                print("無效的編號，請重新輸入。")
+        except (ValueError, IndexError):
+            print("輸入無效，請輸入列表中的數字編號。")
+
+def _display_menu():
+    """顯示主菜單 (v5.2 簡潔版)。"""
+    print("\n" + "="*50)
+    print("      通用目錄哨兵控制中心 v5.2 (UX 畢業版)")
+    print("="*50)
+    print("  1. 新增專案")
+    print("  2. 修改專案")
+    print("  3. 刪除專案")
+    print(" --- ")
+    print("  4. 手動更新 (依名單)")
+    print("  5. (調試)自由更新")
+    print(" --- ")
+    print("  9. 測試後端連接 (Ping)")
+    print("  0. 退出程序")
+    print("="*50)
+
+# --- 主執行區 ---
 
 def main():
-    """程式的主循環，負責接收用戶輸入並調度功能。"""
+    """主循環，包含【原地重試】和【終極安全氣囊】。"""
     while True:
-        show_main_menu()
-        # 我們獲取用戶輸入，並用 lower() 轉為小寫，用 strip() 去掉頭尾空格，以增加容錯性。
-        choice = input("請輸入您的選擇: ").lower().strip()
+        try:
+            _display_menu()
+            choice = input("請選擇操作 > ").lower().strip()
 
-        if choice == '1': # 列出專案
-            clear_screen()
-            print("--- 所有已註冊的專案 ---")
-            projects = _get_projects_from_daemon()
-            # 如果成功獲取到專案列表...
-            if projects:
-                print("\n編號 | 專案別名             | UUID")
-                print("-----|----------------------|---------------------------------------")
-                for i, p in enumerate(projects, 1):
-                    print(f"{i:<4} | {p.get('name', 'N/A'):<20} | {p.get('uuid', 'N/A')}")
-                print("-----------------------------------------------------------------")
-            # 如果獲取到的是一個空列表...
-            elif projects is not None:
-                print("目前沒有任何已註冊的專案。")
-            # 如果獲取失敗 (為 None)，_get_projects_from_daemon 內部已經打印了錯誤。
-            input("\n按 Enter 鍵返回主菜單...")
-
-        elif choice == '2': # 新增專案
-            clear_screen()
-            print("--- 新增專案 ---")
-            # DEFENSE: 捕獲後端可能拋出的 SystemExit 或其他異常。
-            try:
-                name = input("請輸入專案別名: ").strip()
-                if not name:
-                    print("\n操作取消：專案別名不能為空。")
-                else:
-                    path = input("請輸入要監控的專案目錄路徑: ").strip()
-                    output_file = input("請輸入要更新的 Markdown 檔案路徑: ").strip()
-                    # 我們將所有參數打包成一個列表（list）。
-                    args_list = [name, path, output_file]
-                    print("\n  > 正在將請求發送至後台服務...")
-                    # 我們直接調用後端函式，並將參數列表傳給它。
-                    daemon.handle_add_project(args_list)
-            except SystemExit as e:
-                # 我們通過後端返回的「退出碼（exit code）」來判斷操作是否成功。
-                if e.code == 0:
-                    print("\n✅ 後台服務回覆：成功新增專案！")
-                else:
-                    print("\n❌ 新增失敗，請檢查後台報告。")
-            except Exception as e:
-                print(f"\n【致命錯誤】：{e}")
-            input("\n按 Enter 鍵返回主菜單...")
-
-        elif choice == '3': # 修改專案
-            clear_screen()
-            print("--- 修改專案 ---")
-            projects = _get_projects_from_daemon()
-            if projects is not None:
-                selected_project = select_project_from_list(projects)
+            if choice == '0': break
+            elif choice == '9': _call_daemon_and_show_feedback(['ping'])
+            
+            elif choice == '1':
+                while True:
+                    print("\n--- 新增專案 (輸入 'q' 可隨時返回) ---")
+                    name = input("  請輸入專案別名 > ").strip()
+                    if name.lower() == 'q': break
+                    path = input("  請輸入專案目錄絕對路徑 > ").strip()
+                    if path.lower() == 'q': break
+                    output_file = input("  請輸入目標 Markdown 文件絕對路徑 > ").strip()
+                    if output_file.lower() == 'q': break
+                    if name and path and output_file:
+                        if _call_daemon_and_show_feedback(['add_project', name, path, output_file]):
+                            break
+                    else:
+                        print("錯誤：所有欄位都必須填寫，請重新輸入。")
+            
+            elif choice == '2':
+                selected_project = _select_project("修改專案")
                 if selected_project:
-                    uuid_to_edit = selected_project['uuid']
-                    print(f"\n您已選擇修改專案: '{selected_project['name']}'")
-                    print("您可以修改以下哪個欄位？\n  [1] 專案別名 (name)\n  [2] 專案路徑 (path)\n  [3] 輸出文件 (output_file)")
-                    field_choice = input("請輸入您的選擇: ").strip()
-                    # 我們用一個字典（dict）來映射用戶的選擇和真實的欄位名。
-                    field_map = {'1': 'name', '2': 'path', '3': 'output_file'}
-                    if field_choice in field_map:
-                        field_to_edit = field_map[field_choice]
-                        new_value = input(f"請輸入 '{field_to_edit}' 的新值: ").strip()
-                        if new_value:
-                            args_list = [uuid_to_edit, field_to_edit, new_value]
-                            print("\n  > 正在將請求發送至後台服務...")
-                            try:
-                                daemon.handle_edit_project(args_list)
-                            except SystemExit as e:
-                                if e.code == 0: print("\n✅ 後台服務回覆：成功修改專案！")
-                                else: print("\n❌ 修改失敗，請檢查後台報告。")
-                            except Exception as e: print(f"\n【致命錯誤】：{e}")
+                    uuid = selected_project.get('uuid')
+                    name = selected_project.get('name')
+                    if uuid:
+                        print(f"\n您已選擇專案：'{name}'")
+                        field = _select_field_to_edit()
+                        if field:
+                            new_value = input(f"  請輸入 '{field}' 的新值 > ").strip()
+                            if new_value:
+                                _call_daemon_and_show_feedback(['edit_project', uuid, field, new_value])
+                            else:
+                                print("錯誤：新值不能為空。")
+                    else:
+                        print("錯誤：選中的專案缺少 UUID，無法操作。")
+
+            elif choice == '3':
+                selected_project = _select_project("刪除專案")
+                if selected_project:
+                    uuid = selected_project.get('uuid')
+                    name = selected_project.get('name')
+                    if uuid:
+                        confirm = input(f"\n\033[91m[警告] 您確定要刪除專案 '{name}' 嗎？(輸入 y 確認)\033[0m > ").lower().strip()
+                        if confirm == 'y':
+                            _call_daemon_and_show_feedback(['delete_project', uuid])
                         else:
-                            print("\n操作取消：新值不能為空。")
+                            print("刪除操作已取消。")
                     else:
-                        print("\n無效的選擇，操作已取消。")
-            input("\n按 Enter 鍵返回主菜單...")
+                        print("錯誤：選中的專案缺少 UUID，無法操作。")
 
-        elif choice == '4': # 刪除專案
-            clear_screen()
-            print("--- 刪除專案 ---")
-            projects = _get_projects_from_daemon()
-            if projects is not None:
-                selected_project = select_project_from_list(projects)
+            elif choice == '4':
+                selected_project = _select_project("手動更新")
                 if selected_project:
-                    uuid_to_delete = selected_project['uuid']
-                    name_to_delete = selected_project['name']
-                    # DEFENSE: 這是「二次確認安全鎖」，防止用戶誤刪。
-                    print("\n" + "="*40 + f"\n  ⚠️  警告：您即將永久刪除專案 '{name_to_delete}'！\n" + "="*40)
-                    confirmation = input(f"請再次輸入完整的專案名稱 '{name_to_delete}' 以確認刪除: ").strip()
-                    # 只有當用戶輸入的內容和專案名完全一樣時，才執行刪除。
-                    if confirmation == name_to_delete:
-                        args_list = [uuid_to_delete]
-                        print("\n  > 正在將請求發送至後台服務...")
-                        try:
-                            daemon.handle_delete_project(args_list)
-                        except SystemExit as e:
-                            if e.code == 0: print("\n✅ 後台服務回覆：成功刪除專案！")
-                            else: print("\n❌ 刪除失敗，請檢查後台報告。")
-                        except Exception as e: print(f"\n【致命錯誤】：{e}")
+                    uuid = selected_project.get('uuid')
+                    if uuid:
+                        _call_daemon_and_show_feedback(['manual_update', uuid])
                     else:
-                        print("\n輸入不匹配，刪除操作已安全取消。")
-            input("\n按 Enter 鍵返回主菜單...")
+                        print("錯誤：選中的專案缺少 UUID，無法操作。")
 
-        elif choice == 'u':  # 依名單手動更新
-            clear_screen()
-            print("--- 手動更新 (根據名單) ---")
-            projects = _get_projects_from_daemon()
-            if projects is None:
-                input("\n(發生錯誤) 按 Enter 返回主選單...")
-                continue # continue 會跳過本次循環的剩餘部分，直接開始下一次循環。
-            
-            selected_project = select_project_from_list(projects)
-            if not selected_project:
-                input("\n按 Enter 返回主選單...")
-                continue
+            elif choice == '5':
+                print("\n--- (調試)自由更新 ---")
+                project_path = input("  請輸入專案目錄絕對路徑 > ").strip()
+                target_doc = input("  請輸入目標 Markdown 文件絕對路徑 > ").strip()
+                if project_path and target_doc:
+                    _call_daemon_and_show_feedback(['manual_direct', project_path, target_doc])
+                else:
+                    print("錯誤：兩個路徑都必須提供。")
 
-            chosen_uuid = selected_project.get('uuid', '').strip()
-            chosen_name = selected_project.get('name', '<未命名>')
-            
-            print(f"\n> 正在依名單手動更新：{chosen_name}")
-            # HACK: 這裡我們用 subprocess.call 來執行一個全新的 Python 進程，
-            # 調用 daemon.py 並傳遞 'manual_update' 指令。
-            # 這是因為更新流程可能很長，我們不希望它阻塞主菜單。
-            # TODO: 在未來實現全 Python 工作流後，這裡應該改為直接調用 daemon 內的函式。
-            exit_code = subprocess.call([sys.executable, "src/core/daemon.py", "manual_update", chosen_uuid])
-
-            if exit_code == 0:
-                print("✅ 更新完成。")
             else:
-                print("❌ 更新失敗，請查看後台輸出。")
-            input("\n按 Enter 鍵返回主菜單...")
+                print(f"無效的選擇 '{choice}'。")
 
-        elif choice == 'u2': # 自由手動更新
-            clear_screen()
-            print("--- 手動更新 (自由輸入路徑) ---")
-            print("此模式將繞開所有已註冊的專案名單，直接對您提供的路徑執行一次更新。")
-            project_path = input("\n請輸入專案資料夾的絕對路徑：").strip()
-            target_doc = input("請輸入目標檔案 (markdown) 的絕對路徑：").strip()
+            if choice not in ['0']:
+                input("\n--- 按 Enter 鍵返回主菜單 ---")
 
-            # HACK: 同上，這裡也是通過創建一個全新的進程來執行任務。
-            # TODO: 在未來實現全 Python 工作流後，這裡應該改為直接調用 daemon 內的函式。
-            subprocess.run([
-                sys.executable, "src/core/daemon.py", "manual_direct",
-                project_path, target_doc
-            ])
+        except KeyboardInterrupt:
+            print("\n\n操作被用戶中斷。正在退出...")
+            break
+        except Exception as e:
+            # 【承諾 3: 終極安全氣囊】
+            print("\n" + "="*50)
+            print("\033[91m【主程序發生致命錯誤！】\033[0m")
+            print("一個未被預料的錯誤導致當前操作失敗，但主程序依然穩定。")
+            print("請將以下錯誤信息截圖，以便我們進行分析：")
+            print(f"  錯誤類型: {type(e).__name__}")
+            print(f"  錯誤詳情: {e}")
+            print("="*50)
+            input("\n--- 按 Enter 鍵返回主菜單 ---")
 
-            input("\n(已完成) 按 Enter 返回主選單...")
-
-        elif choice == 'q':
-            print("\n正在退出系統，感謝使用！")
-            sys.exit(0)
-
-        else:
-            print(f"\n無效的選擇「{choice}」，請重新輸入。")
-            # time.sleep 讓程式暫停 1.5 秒，給用戶時間看清錯誤提示。
-            time.sleep(1.5)
-
-# 這是一個 Python 的標準寫法。
-# 它確保只有當這個文件被直接執行時（而不是被當作模組導入時），main() 函式才會被調用。
 if __name__ == "__main__":
     main()

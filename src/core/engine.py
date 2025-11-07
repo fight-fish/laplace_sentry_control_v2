@@ -76,7 +76,7 @@ def _generate_tree(root_path, folder_spacing=0, max_depth=None):
             return
 
         # 我們定義一個要排除的目錄集合（set），以提高效率和整潔度。
-        exclude_dirs = {".git", "__pycache__", "test_scaffold", "_archive"}
+        exclude_dirs = {".git", "__pycache__", "test_scaffold", "_archive", ".venv", ".vscode"}
         try:
             # 我們用「列表推導式」來獲取目錄下的所有項目，並過濾掉要排除的。
             items = [name for name in os.listdir(directory) if name not in exclude_dirs]

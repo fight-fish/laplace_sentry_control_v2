@@ -240,7 +240,8 @@ laplace_sentry_control_v2/
 │   │   ├── daemon.py           # 【守護進程（指揮官）】負責調度工人、處理專案清單與手動更新。
 │   │   ├── engine.py           # 【結構專家】生成目錄結構樹並合併註解。
 │   │   ├── formatter.py        # 【格式化專家】負責將結構輸出包裝成 Markdown 代碼塊。
-│   │   └── path.py             # 【路徑專家】執行跨平台路徑轉換與檔案 I/O 操作。
+│   │   ├── path.py             # TODO: Add comment here
+│   │   └── worker.py           # TODO: Add comment here
 │   └── shell/                  # 【Shell 腳本層】負責流程控制與背景操作。
 │       └── worker.sh           # 【工人腳本】執行實際更新任務（由 daemon 呼叫）。
 ├── tests/                      # 【自動化測試區】存放各模組的單元與整合測試腳本。
@@ -253,10 +254,22 @@ laplace_sentry_control_v2/
 │   ├── verify.sh               # 綜合測試指令腳本，快速驗證主要模組功能。
 │   ├── verify_flock.sh         # 測試 flock 機制是否能防止多重 worker 同時運行。
 │   └── verify_path.sh          # 測試 path.py 路徑解析功能是否正確。
-├── .gitignore                  # Git 忽略規則，排除不需版本控制的檔案（如暫存、log）。
-├── PROTOCOL.md                 # 【專案通訊協定書】描述系統模組間的資料流與調用規範。
-├── README.md                   # 【使用說明書】專案整體介紹與操作指令。
-├── main.py                     # 【主控台入口】使用者與系統互動的主菜單介面。
-└── releases.md                 # 【版本紀錄】列出每次發佈的版本變更摘要與更新說明。
+├── tests copy/                 # TODO: Add comment here
+│   ├── test_add_project.sh     # 測試「新增專案」功能是否正常。
+│   ├── test_add_project_v2.sh  # 測試「新增專案」進階版本（含輸入驗證）。
+│   ├── test_edit_delete.py     # 測試專案「修改與刪除」功能。
+│   ├── test_list_projects.sh   # 測試「列出專案清單」功能。
+│   ├── test_ping_pong.sh       # 測試「指揮官 ↔ 工人」通信是否成功。
+│   ├── tests_readme.md         # 測試說明文件，解釋每個測試腳本的用途。
+│   ├── verify.sh               # 綜合測試指令腳本，快速驗證主要模組功能。
+│   ├── verify_flock.sh         # 測試 flock 機制是否能防止多重 worker 同時運行。
+│   └── verify_path.sh          # 測試 path.py 路徑解析功能是否正確。
+├── .gitignore                  # TODO: Add comment here
+├── PROTOCOL.md                 # TODO: Add comment here
+├── README.md                   # TODO: Add comment here
+├── main.py                     # TODO: Add comment here
+└── releases.md                 # TODO: Add comment here
 ```
 <!-- AUTO_TREE_END -->
+
+
