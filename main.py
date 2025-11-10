@@ -16,23 +16,38 @@ from src.core import daemon
 # --- 前端專用輔助函式 ---
 
 def _call_daemon_and_get_output(command_and_args: List[str]) -> Tuple[int, str]:
-    """一個特殊的、只用於獲取後端輸出的內部函式。"""
+    """
+    【v-ADHOC-005 智能重試版】
+    一個特殊的、只用於獲取後端輸出的內部函式。
+    """
     from io import StringIO
     import contextlib
 
     temp_stdout = StringIO()
+    temp_stderr = StringIO() # 我們也捕獲 stderr，以便在重試時保持安靜
     exit_code = -1
+
+    # 我們將 daemon 的調用包裹在 try...except 中，以捕獲所有可能的異常
     try:
-        with contextlib.redirect_stdout(temp_stdout):
+        with contextlib.redirect_stdout(temp_stdout), contextlib.redirect_stderr(temp_stderr):
             exit_code = daemon.main_dispatcher(command_and_args)
     except Exception as e:
-        print(f"\n[前端致命錯誤]：調用後端時發生意外崩潰！\n  -> 原因: {e}", file=sys.stderr)
+        # 如果在調用過程中發生任何未知崩潰，我們打印錯誤並返回一個失敗碼。
+        print(f"\n[前端致命錯誤]：在獲取輸出時，後端發生意外崩潰！\n  -> 原因: {e}", file=sys.stderr)
         return (99, "")
-        
+
+    # --- 【v-ADHOC-005 核心改造】 ---
+    # 我們在這裡也加入對退出碼 10 的判斷
+    if exit_code == 10:
+        # 如果收到重試信號，我們就再次調用自己，獲取恢復後的、健康的數據。
+        print("[前端日誌]：在獲取輸出時收到恢復信號(10)，正在自動重試...", file=sys.stderr)
+        return _call_daemon_and_get_output(command_and_args)
+
+    # 對於所有其他情況（包括成功 0 和其他失敗碼），我們都直接返回結果。
     output = temp_stdout.getvalue()
     return (exit_code, output)
 
-# 位於 main.py
+
 
 def _call_daemon_and_show_feedback(command_and_args: List[str]) -> bool:
     """一個通用的、負責與後端交互並向用戶顯示回饋的函式。"""
@@ -55,20 +70,40 @@ def _call_daemon_and_show_feedback(command_and_args: List[str]) -> bool:
         output = temp_stdout.getvalue()
         error_output = temp_stderr.getvalue()
 
+        # --- 【v-ADHOC-005 核心改造】 ---
+        # 我們現在要區分不同的退出碼
         if exit_code == 0:
             print("\033[92m[✓] 操作成功\033[0m") 
             if output.strip() and output.strip() != "OK":
                 if command_and_args[0] != 'list_projects':
                     print("--- 後端返回信息 ---\n" + output)
             return True
+        # 我們專門為退出碼 10 開闢一條新的處理路徑
+        elif exit_code == 10:
+            # 當收到這個信號時，我們知道後端已經完成了恢復，但需要前端重試。
+            print("[前端日誌]：收到後端數據恢復信號(10)，正在自動重試...")
+            # 我們在這裡，直接、無縫地再次調用自己，把同樣的指令再發送一次。
+            # 這就是「原地重試」的核心。
+            return _call_daemon_and_show_feedback(command_and_args)
         else:
-            # 如果後端返回非零退出碼，我們優先顯示它自己的 stderr 報告
+            # 對於所有其他的非零退出碼，我們才認為是真正的失敗。
             print(f"\033[91m[✗] 操作失敗 (退出碼: {exit_code})\033[0m")
             if error_output.strip():
                 print("--- 後端錯誤報告 ---\n" + error_output.strip())
             else:
                 print("--- 後端未提供額外錯誤信息 ---")
             return False
+
+
+    except daemon.DataRestoredFromBackupWarning as e:
+        # 當捕獲到這個特殊的、非致命的警告時...
+        print("\n" + "="*50)
+        print("\033[93m[提示] 系統偵測到您的專案設定檔曾發生輕微損壞，並已自動從最近的備份中成功恢復。\033[0m")
+        print("請您檢查一下當前的專案列表，確認最近的操作是否都已正確保存。")
+        print(f"  (恢復自: {e})")
+        print("="*50)
+        # 我們返回 True，因為從用戶的角度看，操作最終是「成功」的，系統恢復了正常。
+        return True
 
     except (json.JSONDecodeError, IOError) as e:
         # 針對 I/O 和 JSON 損壞的特定錯誤，給出更清晰的引導
@@ -150,7 +185,6 @@ def _select_field_to_edit() -> Optional[str]:
                 print("無效的編號，請重新輸入。")
         except (ValueError, IndexError):
             print("輸入無效，請輸入列表中的數字編號。")
-
 def _display_menu():
     """顯示主菜單 (v5.2 簡潔版)。"""
     print("\n" + "="*50)

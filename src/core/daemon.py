@@ -16,6 +16,9 @@ from .path import normalize_path, validate_paths_exist
 from .worker import execute_update_workflow
 # 【核心重構】我們導入全新的「I/O 網關」，它是我們所有文件操作的唯一安全出口。
 from .io_gateway import safe_read_modify_write
+# 【核心重構】我們導入全新的「I/O 網關」，以及它可能會發射的「警告信號彈」。
+from .io_gateway import safe_read_modify_write, DataRestoredFromBackupWarning
+
 
 # --- 全局配置 ---
 # 我們計算出專案的根目錄路徑。
@@ -39,19 +42,29 @@ def read_projects_data() -> List[Dict[str, Any]]:
     # 這個函式現在的職責非常單純：它將「讀取」這個具體任務，完全委託給了 I/O 網關。
     try:
         # 我們用「def」來 定義（define）一個什麼都不做的「回調函式」。
-        # 因為我們只想讀取數據，不想做任何修改。
         def read_only_callback(data):
-            # 它接收到數據後，直接將其原樣 返回（return）。
             return data
         
-        # 我們調用「safe_read_modify_write」網關，並把「隻讀」的回調函式傳給它。
-        # 網關會自動處理文件不存在或損壞的情況。
-        return safe_read_modify_write(PROJECTS_FILE, read_only_callback, serializer='json')
-    # 我們用「except IOError」來捕獲網關可能報告的任何 I/O 錯誤（如鎖失敗）。
+        # 【v4.1 核心修改】我們現在調用 I/O 網關，並準備接收一個元組作為返回結果。
+        # 這個元組包含兩個部分：(處理後的數據, 是否從備份中恢復的標誌)
+        new_data, restored = safe_read_modify_write(PROJECTS_FILE, read_only_callback, serializer='json')
+        
+        # 我們用「if」來判斷，如果（if）「已恢復」的標誌（restored）為 True...
+        if restored:
+            # ...我們就用「raise」關鍵字，拋出我們自訂的「警告信號彈」。
+            # 這個信號彈會被更高層的 main.py 捕獲，並向您顯示友好的提示。
+            raise DataRestoredFromBackupWarning("專案列表已從備份恢復，請檢查。")
+            
+        # 如果沒有從備份恢復，我們就正常地 返回（return）讀取到的數據。
+        return new_data
+
+    # 我們用「except DataRestoredFromBackupWarning」來精準捕獲我們自己的「警告信號彈」。
+    except DataRestoredFromBackupWarning:
+        # 當捕獲到它時，我們必須再次用「raise」將它向上拋出，確保 main.py 能收到。
+        raise
+    # 我們用「except IOError」來捕獲網關可能報告的其他所有真正的 I/O 錯誤。
     except IOError as e:
-        # 如果出錯，我們就 打印（print）一條警告到「標準錯誤流（stderr）」。
         print(f"【守護進程警告】：讀取專案文件時出錯: {e}", file=sys.stderr)
-        # 然後 返回（return）一個安全的空「籃子（[]）」。
         return []
 
 # 我們用「def」來 定義（define）一個函式，名叫「write_projects_data」。
@@ -60,19 +73,26 @@ def write_projects_data(data: List[Dict[str, Any]]):
     # TAG: DECOUPLE (解耦)
     # 這個函式同樣將「寫入」任務，完全委託給了 I/O 網關。
     try:
-        # 我們用「def」來 定義（define）一個簡單的回調函式。
-        # 它的作用就是用我們傳入的「新數據（data）」，去完全替換掉「舊數據（_）」。
+        # 我們用「def」來 定義（define）一個簡單的「覆蓋寫入」回調函式。
         def overwrite_callback(_):
             return data
         
-        # 我們調用網關，執行這個「覆蓋寫入」事務。
-        safe_read_modify_write(PROJECTS_FILE, overwrite_callback, serializer='json')
-    # 如果（if）網關報告了任何 I/O 錯誤...
-    except IOError as e:
-        # ...我們就用「raise」關鍵字，將這個錯誤包裝成一個新的「IOError」異常，再向上拋出。
-        # 這樣，更高層的調用者（如 main_dispatcher）就能捕獲到這個失敗信號。
-        raise IOError(f"寫入專案文件時失敗: {e}")
+        # 【v4.1 核心修改】我們同樣準備接收 I/O 網關返回的元組。
+        # 在這裡，我們其實不關心寫入後的數據是什麼，所以可以用「_」來忽略它。
+        _, restored = safe_read_modify_write(PROJECTS_FILE, overwrite_callback, serializer='json')
+        
+        # 我們同樣檢查「已恢復」的標誌。
+        if restored:
+            # 如果在寫入之前，I/O 網關發現文件是壞的並進行了恢復，我們同樣需要向上報告。
+            raise DataRestoredFromBackupWarning("專案列表在寫入前檢測到損壞並已從備份恢復，請檢查。")
 
+    # 我們同樣需要捕獲並再次拋出我們自己的「警告信號彈」。
+    except DataRestoredFromBackupWarning:
+        raise
+    # 如果（if）網關報告了任何其他真正的 I/O 錯誤...
+    except IOError as e:
+        # ...我們就將其包裝成一個新的「IOError」異常，再向上拋出。
+        raise IOError(f"寫入專案文件時失敗: {e}")
 
 # 這是一個內部使用的輔助函式，用於從一個專案的數據中，提取出它所有目標文件的路徑。
 def _get_targets_from_project(project_data):
@@ -344,6 +364,14 @@ def main_dispatcher(argv: List[str]):
 
     # TAG: DEFENSE
     # 這裡是一個全局的「安全網」。它負責捕獲所有處理函式可能拋出的已知異常。
+
+    # 我們首先專門捕獲那個「數據恢復」的警告。
+    except DataRestoredFromBackupWarning as e:
+        # 【v9.0 核心修改】我們不再將其當作錯誤，而是打印一條清晰的、引導性的提示訊息。
+        print(f"【系統通知】偵測到設定檔損壞，並已從備份自動恢復。請從主菜單重新操作一次。", file=sys.stderr)
+        # 我們返回一個特殊的退出碼 10，代表這是一個「需要用戶重試」的成功操作。
+        return 10
+
     except (ValueError, IOError, RuntimeError) as e:
         # 我們將捕獲到的異常信息，打印（print）到「標準錯誤流（stderr）」。
         print(str(e), file=sys.stderr)
