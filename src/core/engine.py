@@ -64,53 +64,59 @@ def _parse_comments(content_string):
 
 # 這裡，我們用「def」來 定義（define）一個函式，名稱是「_generate_tree」。
 # 它的任務是：根據你電腦裡的真實檔案結構，生成一個視覺上穩定、準確的樹狀圖。
-def _generate_tree(root_path, folder_spacing=0, max_depth=None):
+# 我們為函式簽名增加一個新的、可選的參數 ignore_patterns
+def _generate_tree(root_path, folder_spacing=0, max_depth=None, ignore_patterns=None):
     # 我們準備一個叫「lines」的空列表（list），用來收集樹狀圖的每一行。
     lines = []
 
     # 我們在函式內部，又定義（define）了一個遞迴輔助函式「recursive_helper」。
     # 這是實現目錄遍歷的核心。
-    def recursive_helper(directory, prefix, depth):
-        # 如果達到了最大深度限制，就停止遞迴。
+    def recursive_helper(directory, prefix, depth, ignore_set):
         if max_depth is not None and depth >= max_depth:
             return
 
-        # 我們定義一個要排除的目錄集合（set），以提高效率和整潔度。
-        exclude_dirs = {".git", "__pycache__", "test_scaffold", "_archive", ".venv", ".vscode"}
         try:
-            # 我們用「列表推導式」來獲取目錄下的所有項目，並過濾掉要排除的。
-            items = [name for name in os.listdir(directory) if name not in exclude_dirs]
+            # --- 【v5.5 核心改造】 ---
+            # 我們現在不再使用寫死的 exclude_dirs，而是直接使用從外部傳入的 ignore_set。
+            items = [name for name in os.listdir(directory) if name not in ignore_set]
         except FileNotFoundError:
-            # DEFENSE: 如果在遞迴過程中，某個子目錄突然消失了，我們不能讓整個程式崩潰。
             print(f"【引擎警告】：在生成目錄樹時，找不到子目錄 '{directory}'，已跳過。", file=sys.stderr)
             return
 
-        # 我們對項目進行排序，確保每次生成的順序都一樣。
-        # 排序規則是：資料夾優先，然後按字母順序。
         entries = sorted(items, key=lambda name: (not os.path.isdir(os.path.join(directory, name)), name))
 
         for i, entry_name in enumerate(entries):
             is_last = (i == len(entries) - 1)
             path = os.path.join(directory, entry_name)
-            # 如果是目錄，就在名字後面加上 "/"。
             display_name = entry_name + "/" if os.path.isdir(path) else entry_name
-            # 根據是否是最後一個項目，選擇不同的樹狀符號。
             line_content = f"{prefix}{('└── ' if is_last else '├── ')}{display_name}"
             lines.append(line_content)
 
             if os.path.isdir(path):
-                # 為了保持視覺上的連續性，我們計算下一層遞迴需要的前綴。
                 new_prefix = prefix + ("    " if is_last else "│   ")
-                # 進行遞迴調用。
-                recursive_helper(path, new_prefix, depth + 1)
-                # FUTURE: 這是為了未來可能增加的「資料夾間距」功能預留的。
+                # --- 【v5.5 核心改造】 ---
+                # 我們在進行遞迴調用時，也將 ignore_set 這個「忽略規則集」繼續傳遞下去。
+                recursive_helper(path, new_prefix, depth + 1, ignore_set)
                 if folder_spacing > 0 and not is_last:
                     lines.append(prefix + "│   ")
 
+
     # 我們將根目錄本身作為樹的第一行。
     lines.append(os.path.basename(root_path) + "/")
-    # 開始遞迴。
-    recursive_helper(root_path, "", depth=0)
+    # --- 【v5.5 增量修改 1：引入合併邏輯】 ---
+    # 1. 我們定義一個基礎的、絕對不能被忽略的系統級黑名單。
+    SYSTEM_DEFAULT_IGNORE = {".git", "__pycache__", ".venv", ".vscode"}
+
+    # 2. 我們檢查外部傳入的 ignore_patterns 是否不是 None。
+    if ignore_patterns is not None:
+        # 如果它不是 None，我們就用「並集（|）」操作，將其與我們的安全默認值合併。
+        final_ignore_set = ignore_patterns | SYSTEM_DEFAULT_IGNORE
+    else:
+        # 否則（例如，從手動更新調用時），我們就只使用我們的安全底線。
+        final_ignore_set = SYSTEM_DEFAULT_IGNORE
+        # 開始遞迴。
+    # 我們將計算好的 final_ignore_set，作為新的參數傳遞給遞迴函式。
+    recursive_helper(root_path, "", depth=0, ignore_set=final_ignore_set)
     return lines
 
 # ==============================================================================
@@ -165,13 +171,15 @@ def _merge_and_align_comments(tree_lines, comments):
 
 # 這裡，我們用「def」來 定義（define）一個公開的、可以從外部調用的主函式。
 # 它的任務是：按順序調用所有內部函式，完成一次完整的生成流程。
-def generate_annotated_tree(root_path, old_content_string: str | None = "None", folder_spacing=0, max_depth=None):
+# 我們同樣為這個公開的函式，增加一個可選的 ignore_patterns 參數
+def generate_annotated_tree(root_path, old_content_string: str | None = "None", folder_spacing=0, max_depth=None, ignore_patterns=None):
 
     # 1. 調用【v4.0 解析器】，傳入完整的舊內容，拿到註解字典。
     comments = _parse_comments(old_content_string)
 
     # 2. 調用【結構生成器】，拿到純淨的、視覺完美的目錄樹行列表。
-    tree_lines = _generate_tree(root_path, folder_spacing=folder_spacing, max_depth=max_depth)
+    # 我們將接收到的 ignore_patterns 參數，原封不動地傳遞給底層的 _generate_tree 函式
+    tree_lines = _generate_tree(root_path, folder_spacing=folder_spacing, max_depth=max_depth, ignore_patterns=ignore_patterns)
 
     # 3. 調用【v4.0 合併器】，把新的樹狀圖和解析出來的註解合併並對齊。
     final_tree_lines = _merge_and_align_comments(tree_lines, comments)
