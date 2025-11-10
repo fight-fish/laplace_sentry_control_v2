@@ -1,0 +1,129 @@
+# 我們需要 導入（import）一些基本的工具。
+import sys
+import time
+import os
+from typing import Dict
+# 我們從 watchdog 這個第三方庫中，導入我們需要的兩個核心組件。
+from watchdog.observers.polling import PollingObserver
+from watchdog.events import FileSystemEventHandler
+
+# --- 【v5.0 核心改造】 ---
+# 我們在程式碼的頂部，定義一個名為「SENTRY_INTERNAL_IGNORE」的「絕對禁區」列表。
+# 這是一個元組（tuple），意味著它的內容是不可修改的，更加安全。
+# 我們將所有系統自身會產生變動的目錄，都放入這個禁區。
+SENTRY_INTERNAL_IGNORE = ('logs', 'temp', '.git', '__pycache__', '.venv', '.vscode')
+
+# --- 【v5.4 抖動抑制器】 ---
+# 我們用「class」關鍵字，來定義一個全新的類，名叫「EventThrottler」。
+class EventThrottler:
+    # 我們用「def __init__」來定義這個類的「初始化方法」。
+    # 當我們創建一個 EventThrottler 的實例時，這個方法會被自動調用。
+    def __init__(self, delay: float = 2.0):
+        # 「delay」是我們的「冷靜期」，單位是秒。
+        self.delay = delay
+        # 「self.timestamps」是一個字典，用來記錄我們為每個文件「關上門」的時間點。
+        # Key 是文件路徑，Value 是時間戳。
+        self.timestamps: Dict[str, float] = {}
+
+    # 我們定義一個方法，名叫「should_process」。
+    # 它的作用是判斷：對於傳入的這個「事件（event）」，我們是否應該處理它？
+    def should_process(self, event) -> bool:
+        # 我們只對「文件被修改（modified）」和「文件被創建（created）」的事件進行抖動抑制。
+        # 對於「刪除」或「移動」等事件，我們總是立即處理。
+        if event.event_type not in ('modified', 'created'):
+            return True
+
+        # 我們獲取事件發生的文件路徑。
+        path = event.src_path
+        # 我們獲取當前的時間戳。
+        now = time.time()
+        
+        # 我們從「時間戳字典」中，獲取該文件上一次被處理的時間。
+        # .get(path, 0) 的意思是，如果找不到這個文件，就默認返回 0。
+        last_processed_time = self.timestamps.get(path, 0)
+
+        # 核心判斷：如果（if）「現在」距離「上次處理的時間」大於我們的「冷靜期」...
+        if now - last_processed_time > self.delay:
+            # ...這意味著冷靜期已過，這是一個全新的、需要被處理的事件。
+            # 我們更新「時間戳字典」，將當前時間記錄為這個文件的「最新處理時間」。
+            self.timestamps[path] = now
+            # 然後 返回（return）True，表示「應該處理」。
+            return True
+        
+        # 否則（else），如果還在冷靜期內...
+        # 我們就 返回（return）False，表示「應該忽略」。
+        return False
+
+
+# 我們用「class」關鍵字，來定義一個我們自己的「事件處理器」。
+class SentryEventHandler(FileSystemEventHandler):
+        # 在處理器的初始化方法中，我們創建一個「抖動抑制器」的實例。
+    def __init__(self, throttler: EventThrottler):
+        self.throttler = throttler
+    # 我們用「def」來 定義（define）一個方法，名叫「on_any_event」。
+    def on_any_event(self, event):
+        
+        # --- 【v5.2 最終過濾版】 ---
+        # 我們首先確保我們處理的是一個字串路徑。
+        if isinstance(event.src_path, str):
+            # 我們現在用一個更嚴格的、多條件的過濾邏輯。
+            # 我們遍歷每一個「禁區目錄」。
+            for ignore_dir in SENTRY_INTERNAL_IGNORE:
+                # 我們構造兩種需要被過濾的模式：
+                # 模式 A: 像 "/logs/" 這樣，出現在路徑中間。
+                pattern_A = f"/{ignore_dir}/"
+                # 模式 B: 像 "/logs" 這樣，作為路徑的結尾。
+                pattern_B = f"/{ignore_dir}"
+
+                # 我們用「if」來判斷，只要（if）事件路徑包含了模式 A，
+                # 或者（or）事件路徑是以模式 B 結尾的...
+                if pattern_A in event.src_path or event.src_path.endswith(pattern_B):
+                    # ...我們就立刻返回，將其徹底過濾。
+                    return
+                    # --- 【v5.4 核心改造】 ---
+        # 在打印任何日誌之前，我們先詢問「抖動抑制器」，這個事件是否應該被處理。
+        # 我們用「if not」來判斷，如果（if not）不應該處理...
+        if not self.throttler.should_process(event):
+            # ...我們就直接「返回（return）」，將其靜默過濾掉。
+            return
+        # 只有通過了上面所有嚴格檢查的事件，才能到達這裡。
+        print(f"[{time.strftime('%H:%M:%S')}] [安全事件] 偵測到: {event.event_type} - 路徑: {event.src_path}")
+        sys.stdout.flush()
+
+
+
+# 我們用「def」來 定義（define）這個工人的主函式。
+def main():
+    # (main 函式的其他部分與之前完全相同，此處保持簡潔，暫不重複註解)
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    
+    print(f"哨兵工人已啟動。PID: {os.getpid()}")
+    print(f"將使用「可靠輪詢」模式，監控目錄: {project_root}")
+    sys.stdout.flush()
+
+    # --- 【v5.4 核心改造】 ---
+    # 我們創建一個「抖動抑制器」的實例，冷靜期設置為 2 秒。
+    throttler = EventThrottler(delay=2.0)
+    # 我們在創建「事件處理器」時，把這個「抖動抑制器」傳遞給它。
+    event_handler = SentryEventHandler(throttler=throttler)
+
+    observer = PollingObserver(timeout=2)
+    
+    observer.schedule(event_handler, project_root, recursive=True)
+    
+    observer.start()
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n收到退出信號，正在停止觀察者...")
+    finally:
+        observer.stop()
+        observer.join()
+        print("觀察者已成功停止。")
+
+
+# 這是一個 Python 的標準寫法。
+if __name__ == "__main__":
+    main()
