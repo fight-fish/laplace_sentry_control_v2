@@ -11,7 +11,7 @@ from watchdog.events import FileSystemEventHandler
 # 我們在程式碼的頂部，定義一個名為「SENTRY_INTERNAL_IGNORE」的「絕對禁區」列表。
 # 這是一個元組（tuple），意味著它的內容是不可修改的，更加安全。
 # 我們將所有系統自身會產生變動的目錄，都放入這個禁區。
-SENTRY_INTERNAL_IGNORE = ('logs', 'temp', '.git', '__pycache__', '.venv', '.vscode')
+SENTRY_INTERNAL_IGNORE = ('logs', 'temp', 'data','.git', '__pycache__', '.venv', '.vscode')
 
 # --- 【v5.4 抖動抑制器】 ---
 # 我們用「class」關鍵字，來定義一個全新的類，名叫「EventThrottler」。
@@ -54,32 +54,36 @@ class EventThrottler:
         # 我們就 返回（return）False，表示「應該忽略」。
         return False
 
+# ... import 語句 ...
+# HACK: 為了能導入 src/core 下的模塊，我們臨時將專案根目錄添加到系統路徑中。
+project_root_for_import = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if project_root_for_import not in sys.path:
+    sys.path.insert(0, project_root_for_import)
+
+from src.core import daemon # <--- 新增：導入我們的指揮官
 
 # 我們用「class」關鍵字，來定義一個我們自己的「事件處理器」。
 class SentryEventHandler(FileSystemEventHandler):
         # 在處理器的初始化方法中，我們創建一個「抖動抑制器」的實例。
-    def __init__(self, throttler: EventThrottler):
+    def __init__(self, throttler: EventThrottler, project_uuid: str):
         self.throttler = throttler
+        self.project_uuid = project_uuid
     # 我們用「def」來 定義（define）一個方法，名叫「on_any_event」。
     def on_any_event(self, event):
         
         # --- 【v5.2 最終過濾版】 ---
         # 我們首先確保我們處理的是一個字串路徑。
         if isinstance(event.src_path, str):
-            # 我們現在用一個更嚴格的、多條件的過濾邏輯。
-            # 我們遍歷每一個「禁區目錄」。
-            for ignore_dir in SENTRY_INTERNAL_IGNORE:
-                # 我們構造兩種需要被過濾的模式：
-                # 模式 A: 像 "/logs/" 這樣，出現在路徑中間。
-                pattern_A = f"/{ignore_dir}/"
-                # 模式 B: 像 "/logs" 這樣，作為路徑的結尾。
-                pattern_B = f"/{ignore_dir}"
+            # 我們將事件路徑，通過 os.path.normpath 進行標準化，消除多餘的斜線。
+            normalized_path = os.path.normpath(event.src_path)
+            # 我們用 split(os.sep) 將路徑分割成一個個的部分，例如 ['home', 'serpal', 'project', 'data', 'file.json']
+            path_parts = normalized_path.split(os.sep)
 
-                # 我們用「if」來判斷，只要（if）事件路徑包含了模式 A，
-                # 或者（or）事件路徑是以模式 B 結尾的...
-                if pattern_A in event.src_path or event.src_path.endswith(pattern_B):
-                    # ...我們就立刻返回，將其徹底過濾。
-                    return
+            # 我們用 any() 和一個生成器表達式，來判斷路徑的任何一個部分，是否存在於我們的禁區列表中。
+            # 這比手動拼接字串要健壯得多。
+            if any(part in SENTRY_INTERNAL_IGNORE for part in path_parts):
+                return
+
                     # --- 【v5.4 核心改造】 ---
         # 在打印任何日誌之前，我們先詢問「抖動抑制器」，這個事件是否應該被處理。
         # 我們用「if not」來判斷，如果（if not）不應該處理...
@@ -90,7 +94,39 @@ class SentryEventHandler(FileSystemEventHandler):
         print(f"[{time.strftime('%H:%M:%S')}] [安全事件] 偵測到: {event.event_type} - 路徑: {event.src_path}")
         sys.stdout.flush()
 
+        # --- 【v5.0 核心集成邏輯】 ---
+        try:
+            # 1. 我們從指揮官那裡獲取完整的專案列表。
+            all_projects = daemon.handle_list_projects()
+            # 2. 我們在列表中，查找與自己 UUID 匹配的那個專案。
+            project_config = next((p for p in all_projects if p.get('uuid') == self.project_uuid), None)
 
+            if not project_config:
+                print(f"【哨兵錯誤】: 在 projects.json 中找不到 UUID 為 {self.project_uuid} 的專案配置。", file=sys.stderr)
+                return
+
+            # 3. 我們從配置中，解析出執行任務所需的所有情報。
+            project_path = project_config.get('path')
+            targets = daemon._get_targets_from_project(project_config) # 複用 daemon 的輔助函式
+            target_doc = targets[0] if targets else None
+            ignore_list = project_config.get("ignore_patterns")
+            ignore_patterns = set(ignore_list) if isinstance(ignore_list, list) else None
+
+            if not project_path or not target_doc:
+                print(f"【哨兵錯誤】: 專案 '{project_config.get('name')}' 缺少有效的路徑配置。", file=sys.stderr)
+                return
+
+            # 4. 我們直接調用指揮官的 handle_manual_direct 函式，下達更新指令！
+            print(f"[{time.strftime('%H:%M:%S')}] [哨兵情報] 目標: {os.path.basename(target_doc)}, 忽略規則: {ignore_patterns}")
+            daemon.handle_manual_direct([project_path, target_doc], ignore_patterns=ignore_patterns)
+            
+            print(f"[{time.strftime('%H:%M:%S')}] [哨兵行動] 更新流程已成功觸發。")
+
+        except Exception as e:
+            # 任何在上述流程中發生的意外，都會被這個安全網捕獲。
+            print(f"【哨兵致命錯誤】: 在執行更新流程時發生意外: {e}", file=sys.stderr)
+        finally:
+            sys.stdout.flush()
 
 # 我們用「def」來 定義（define）這個工人的主函式。
 def main():
@@ -117,8 +153,8 @@ def main():
     # --- 【v5.4 核心改造】 ---
     # 我們創建一個「抖動抑制器」的實例，冷靜期設置為 2 秒。
     throttler = EventThrottler(delay=2.0)
-    # 我們在創建「事件處理器」時，把這個「抖動抑制器」傳遞給它。
-    event_handler = SentryEventHandler(throttler=throttler)
+    # 在創建事件處理器時，把 「抖動抑制器」跟 project_uuid 也傳進去。
+    event_handler = SentryEventHandler(throttler=throttler, project_uuid=project_uuid)
 
     observer = PollingObserver(timeout=2)
     

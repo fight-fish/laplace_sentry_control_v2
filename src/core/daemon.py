@@ -272,11 +272,17 @@ def handle_manual_update(args: List[str]):
     targets = _get_targets_from_project(selected_project)
     target_doc_path = targets[0] if targets else None
 
+    # 我們從專案的數據中，獲取 ignore_patterns。
+    ignore_list = selected_project.get("ignore_patterns")
+    # 我們檢查它是否是一個列表，如果是，就用 set() 將它轉換為一個集合。
+    ignore_patterns = set(ignore_list) if isinstance(ignore_list, list) else None
+
     if not project_path or not target_doc_path:
         raise ValueError(f"專案 '{selected_project.get('name')}' 缺少有效的路徑配置。")
 
     # 我們調用「_run_single_update_workflow」來獲取更新後的目錄樹內容。
-    exit_code, formatted_tree_block = _run_single_update_workflow(project_path, target_doc_path)
+    exit_code, formatted_tree_block = _run_single_update_workflow(project_path, target_doc_path, ignore_patterns=ignore_patterns)
+    
     if exit_code != 0:
         raise RuntimeError(f"底層工人執行失敗:\n{formatted_tree_block}")
 
