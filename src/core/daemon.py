@@ -106,7 +106,7 @@ def _get_targets_from_project(project_data):
 
 # --- 統一更新入口 ---
 # 這個函式負責執行一次完整的「單文件更新」流程。
-def _run_single_update_workflow(project_path: str, target_doc: str) -> Tuple[int, str]:
+def _run_single_update_workflow(project_path: str, target_doc: str, ignore_patterns: Optional[set] = None) -> Tuple[int, str]:
     # (此函式在之前的重構中已添加過註解，且邏輯未變，此處保持簡潔，暫不重複註解)
     if not isinstance(project_path, str) or not os.path.isdir(project_path):
         return (2, f"【更新失敗】: 專案路徑不存在或無效 -> {project_path}")
@@ -127,7 +127,8 @@ def _run_single_update_workflow(project_path: str, target_doc: str) -> Tuple[int
         err = f"[DAEMON:READ] 讀取目標文件時發生意外錯誤: {e}"
         return (3, err)
 
-    exit_code, result = execute_update_workflow(project_path, target_doc, old_content)
+    # 在 _run_single_update_workflow 函式內部
+    exit_code, result = execute_update_workflow(project_path, target_doc, old_content, ignore_patterns=ignore_patterns)
 
     timestamp_done = time.strftime('%Y-%m-%d %H:%M:%S')
     status = "成功" if exit_code == 0 else "失敗"
@@ -295,18 +296,18 @@ def handle_manual_update(args: List[str]):
     # 注意，這裡的序列化器是「text」，因為我們處理的是純文本。
     safe_read_modify_write(target_doc_path, update_md_callback, serializer='text')
 
-# 處理「manual_direct」命令。
-def handle_manual_direct(args: List[str]):
+    # 處理「manual_direct」命令。
+def handle_manual_direct(args: List[str], ignore_patterns: Optional[set] = None):    
     # (此函式邏輯與 handle_manual_update 高度相似，暫不重複註解以保持簡潔)
     if len(args) != 2:
         raise ValueError("【自由更新失敗】：需要 2 個參數 (project_path, target_doc_path)。")
     
     project_path, target_doc_path = map(normalize_path, args)
-    
+
     if not os.path.isdir(project_path):
         raise IOError(f"專案目錄不存在或無效 -> {project_path}")
 
-    exit_code, formatted_tree_block = _run_single_update_workflow(project_path, target_doc_path)
+    exit_code, formatted_tree_block = _run_single_update_workflow(project_path, target_doc_path, ignore_patterns=ignore_patterns)
     if exit_code != 0:
         raise RuntimeError(f"底層工人執行失敗:\n{formatted_tree_block}")
 

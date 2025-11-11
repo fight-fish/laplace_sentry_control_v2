@@ -229,47 +229,72 @@ python3 main.py
 <!-- AUTO_TREE_START -->
 ```
 laplace_sentry_control_v2/
-├── data/                       # 【數據區】存放專案運行所需的持久化資料。
-│   └── projects.json           # 【專案名單】以 JSON 格式記錄所有受監控專案與設定。
-├── logs/                       # 【日誌區】存放哨兵運行時產生的暫存檔與鎖定檔。
-│   ├── .gitkeep                # 讓 Git 保留此空資料夾的佔位符。
-│   └── .worker.lock            # 【鎖定檔】由 worker.sh 使用 flock 機制產生，用來防止重複啟動工人進程。
-├── src/                        # 【源碼區】存放專案的主要程式碼。
-│   ├── core/                   # 【核心模組】可獨立執行的 Python 模組（專家層）。
-│   │   ├── __init__.py         # 標記此資料夾為 Python 套件，供其他模組導入使用。
-│   │   ├── daemon.py           # 【守護進程（指揮官）】負責調度工人、處理專案清單與手動更新。
-│   │   ├── engine.py           # 【結構專家】生成目錄結構樹並合併註解。
-│   │   ├── formatter.py        # 【格式化專家】負責將結構輸出包裝成 Markdown 代碼塊。
-│   │   ├── path.py             # TODO: Add comment here
-│   │   └── worker.py           # TODO: Add comment here
-│   └── shell/                  # 【Shell 腳本層】負責流程控制與背景操作。
-│       └── worker.sh           # 【工人腳本】執行實際更新任務（由 daemon 呼叫）。
-├── tests/                      # 【自動化測試區】存放各模組的單元與整合測試腳本。
-│   ├── test_add_project.sh     # 測試「新增專案」功能是否正常。
-│   ├── test_add_project_v2.sh  # 測試「新增專案」進階版本（含輸入驗證）。
-│   ├── test_edit_delete.py     # 測試專案「修改與刪除」功能。
-│   ├── test_list_projects.sh   # 測試「列出專案清單」功能。
-│   ├── test_ping_pong.sh       # 測試「指揮官 ↔ 工人」通信是否成功。
-│   ├── tests_readme.md         # 測試說明文件，解釋每個測試腳本的用途。
-│   ├── verify.sh               # 綜合測試指令腳本，快速驗證主要模組功能。
-│   ├── verify_flock.sh         # 測試 flock 機制是否能防止多重 worker 同時運行。
-│   └── verify_path.sh          # 測試 path.py 路徑解析功能是否正確。
-├── tests copy/                 # TODO: Add comment here
-│   ├── test_add_project.sh     # 測試「新增專案」功能是否正常。
-│   ├── test_add_project_v2.sh  # 測試「新增專案」進階版本（含輸入驗證）。
-│   ├── test_edit_delete.py     # 測試專案「修改與刪除」功能。
-│   ├── test_list_projects.sh   # 測試「列出專案清單」功能。
-│   ├── test_ping_pong.sh       # 測試「指揮官 ↔ 工人」通信是否成功。
-│   ├── tests_readme.md         # 測試說明文件，解釋每個測試腳本的用途。
-│   ├── verify.sh               # 綜合測試指令腳本，快速驗證主要模組功能。
-│   ├── verify_flock.sh         # 測試 flock 機制是否能防止多重 worker 同時運行。
-│   └── verify_path.sh          # 測試 path.py 路徑解析功能是否正確。
-├── .gitignore                  # TODO: Add comment here
-├── PROTOCOL.md                 # TODO: Add comment here
-├── README.md                   # TODO: Add comment here
-├── main.py                     # TODO: Add comment here
-└── releases.md                 # TODO: Add comment here
+├── data/                                            # 【數據區】存放專案運行所需的持久化資料。
+│   └── projects.json                                # 【專案名單】以 JSON 格式記錄所有受監控專案與設定。
+├── logs/                                            # 【日誌區】存放哨兵運行時產生的暫存檔與鎖定檔。
+│   ├── .gitkeep                                     # 讓 Git 保留此空資料夾的佔位符。
+│   ├── test_ignore.log                              # TODO: Add comment here
+│   ├── 測試檔.log                                      # TODO: Add comment here
+│   ├── 自主開發.log                                     # TODO: Add comment here
+│   └── 自動目錄.log                                     # TODO: Add comment here
+├── src/                                             # 【源碼區】存放專案的主要程式碼。
+│   └── core/                                        # TODO: Add comment here
+│       ├── __init__.py                              # TODO: Add comment here
+│       ├── daemon.py                                # TODO: Add comment here
+│       ├── engine.py                                # TODO: Add comment here
+│       ├── formatter.py                             # TODO: Add comment here
+│       ├── io_gateway.py                            # TODO: Add comment here
+│       ├── path.py                                  # TODO: Add comment here
+│       ├── sentry_worker.py                         # TODO: Add comment here
+│       └── worker.py                                # TODO: Add comment here
+├── temp/                                            # TODO: Add comment here
+│   ├── .gitkeep                                     # 讓 Git 保留此空資料夾的佔位符。
+│   ├── BDD Agent設計.md.20251110-233040.bak           # TODO: Add comment here
+│   ├── BDD Agent設計.md.20251110-234651.bak           # TODO: Add comment here
+│   ├── BDD Agent設計.md.20251111-071911.bak           # TODO: Add comment here
+│   ├── TARGET.md.20251111-080940.bak                # TODO: Add comment here
+│   ├── TARGET.md.20251111-081107.bak                # TODO: Add comment here
+│   ├── projects.json.20251110-235338.bak            # TODO: Add comment here
+│   ├── projects.json.20251111-071814.bak            # TODO: Add comment here
+│   ├── projects.json.20251111-071818.bak            # TODO: Add comment here
+│   ├── test_temp_ignore.tmp                         # TODO: Add comment here
+│   ├── 《Ψ-碼保真度驗證實驗設計書 v2.0》.md.20251110-233139.bak  # TODO: Add comment here
+│   ├── 《Ψ-碼保真度驗證實驗設計書 v2.0》.md.20251110-235434.bak  # TODO: Add comment here
+│   ├── 通用目錄測試寫入檔(測試用).md.20251110-234740.bak        # TODO: Add comment here
+│   ├── 通用目錄測試寫入檔(測試用).md.20251110-235338.bak        # TODO: Add comment here
+│   └── 通用目錄測試寫入檔(測試用).md.20251111-071818.bak        # TODO: Add comment here
+├── tests/                                           # 【自動化測試區】存放各模組的單元與整合測試腳本。
+│   ├── tests/                                       # TODO: Add comment here
+│   │   └── test_daemon_to_worker_integration.py     # TODO: Add comment here
+│   ├── 00                                           # TODO: Add comment here
+│   ├── 809                                          # TODO: Add comment here
+│   ├── 89                                           # TODO: Add comment here
+│   ├── fake_expert_sleeps.py                        # TODO: Add comment here
+│   ├── grg                                          # TODO: Add comment here
+│   ├── test_atomic_write.py                         # TODO: Add comment here
+│   ├── test_daemon_integration.py                   # TODO: Add comment here
+│   ├── test_file_lock.py                            # TODO: Add comment here
+│   ├── test_integration_atomic_update.py            # TODO: Add comment here
+│   ├── test_timeout.py                              # TODO: Add comment here
+│   ├── test_worker_workflow.py                      # TODO: Add comment here
+│   └── tests_readme.md                              # TODO: Add comment here
+├── tests copy/                                      # TODO: Add comment here
+│   ├── 00                                           # TODO: Add comment here
+│   ├── 809                                          # TODO: Add comment here
+│   ├── 89                                           # TODO: Add comment here
+│   ├── fake_expert_sleeps.py                        # TODO: Add comment here
+│   ├── grg                                          # TODO: Add comment here
+│   ├── test_atomic_write.py                         # TODO: Add comment here
+│   ├── test_daemon_logic.py                         # TODO: Add comment here
+│   ├── test_file_lock.py                            # TODO: Add comment here
+│   ├── test_integration_atomic_update.py            # TODO: Add comment here
+│   ├── test_timeout.py                              # TODO: Add comment here
+│   └── tests_readme.md                              # TODO: Add comment here
+├── .gitignore                                       # TODO: Add comment here
+├── PROTOCOL.md                                      # TODO: Add comment here
+├── README.md                                        # TODO: Add comment here
+├── main.py                                          # TODO: Add comment here
+├── releases.md                                      # TODO: Add comment here
+└── requirements.txt                                 # TODO: Add comment here
 ```
 <!-- AUTO_TREE_END -->
-
-

@@ -1,7 +1,11 @@
-# 我們需要 導入（import）幾個 Python 內建的標準工具。
+# src/core/worker.py
+
+# 我們需要 導入（import）一系列 Python 內建的工具。
 import os
 import sys
-import subprocess
+from io import StringIO
+# 我們從 typing 導入 Optional，因為新參數是可選的。
+from typing import Optional, Set
 
 # HACK: 這段程式碼是為了解決一個導入問題。
 # 我們用「if __name__ == '__main__'」這個結構來判斷，如果（if）這個腳本是直接被執行的...
@@ -13,89 +17,78 @@ if __name__ == '__main__' and __package__ is None:
     # 最後，我們把這個根目錄，插入（insert）到系統的「尋找路徑列表（sys.path）」的最前面。
     sys.path.insert(0, project_root)
 
+# --- 【v2.0 核心重構】 ---
+# 我們現在不再需要 subprocess，而是直接導入我們的專家模塊。
+from src.core import engine, formatter
+
 # 我們用「def」來 定義（define）一個我們自己的函式，名為「執行更新工作流」。
-# 它會返回一個「元組（tuple）」，裡面包含一個整數和一個字串。
-def execute_update_workflow(project_path: str, target_doc: str, old_content: str) -> tuple[int, str]:
+def execute_update_workflow(
+    project_path: str, 
+    target_doc: str, 
+    old_content: str, 
+    ignore_patterns: Optional[Set[str]] = None  # <--- 核心改造點 1
+) -> tuple[int, str]:    
     """
-    【工人專家】執行完整的「生產->包裝」更新流水線。
+    【工人專家 v2.0 - 純 Python 版】
+    執行完整的「生產->包裝」更新流水線，所有專家均通過內部函式調用。
     """
-    # 我們先獲取專案的根目錄路徑。
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-    
-    # --- 步驟 1: 調用 engine.py (生產線) ---
-    # 我們把「結構專家（engine.py）」的完整路徑準備好。
-    engine_script_path = os.path.join(project_root, 'src', 'core', 'engine.py')
-    # 我們用「subprocess.run」這個工具，來執行一個外部命令。
-    p1 = subprocess.run(
-        # 這個命令被打包成一個「列表（list）」。
-        [sys.executable, engine_script_path, project_path, "-"],
-        input=old_content,
-        text=True,
-        encoding='utf-8',
-        capture_output=True,
-        env=os.environ
-    )
-    # 我們用「if」來判斷，如果（if）上一步操作的「返回碼（returncode）」不等於 0...
-    if p1.returncode != 0:
-        # 我們就準備一份錯誤報告。
-        error_message = f"【工人失敗】：結構專家 (engine.py) 執行失敗。\n--- 結構專家錯誤報告 ---\n{p1.stderr.strip()}"
-        # 然後，我們 返回（return）一個代表失敗的退出碼 `3` 和這份錯誤報告。
+    try:
+        # --- 步驟 1: 直接調用 engine.py (生產線) ---
+        # 我們在調用 engine 時，將接收到的 ignore_patterns 參數原封不動地傳遞下去。
+        raw_material = engine.generate_annotated_tree(
+            project_path, 
+            old_content,
+            ignore_patterns=ignore_patterns # <--- 核心改造點 2
+        )
+
+        # --- 步驟 2: 直接調用 formatter.py (包裝線) ---
+        # 我們使用在測試中被驗證過的「環境偽造」技巧，來安全地調用 formatter.main()。
+        fake_stdin = StringIO(raw_material)
+        fake_stdout = StringIO()
+        # 我們偽造一個符合 formatter 預期的命令行參數列表。
+        fake_argv = ['formatter.py', '--strategy', 'obsidian']
+
+        # 我們備份並劫持系統的 I/O 和參數。
+        original_stdin, original_stdout, original_argv = sys.stdin, sys.stdout, sys.argv
+        try:
+            sys.stdin, sys.stdout, sys.argv = fake_stdin, fake_stdout, fake_argv
+            # 在這個安全的「矩陣」中，執行 formatter 的 main 函式。
+            formatter.main()
+            # 從偽造的標準輸出中，獲取最終的「成品」。
+            finished_product = fake_stdout.getvalue()
+        finally:
+            # 無論如何，都必須將系統狀態還原！
+            sys.stdin, sys.stdout, sys.argv = original_stdin, original_stdout, original_argv
+        
+        # 所有步驟都順利完成，我們 返回（return）一個代表成功的退出碼 `0` 和我們的最終成品。
+        return (0, finished_product.strip())
+
+    # 我們用一個全局的「except Exception」來捕獲任何在工作流中可能發生的未知錯誤。
+    except Exception as e:
+        # 如果發生任何錯誤，我們就準備一份詳細的錯誤報告。
+        error_message = f"【工人失敗 v2.0】：在純 Python 工作流中發生意外錯誤。\n--- 錯誤詳情 ---\n{type(e).__name__}: {e}"
+        # 然後，返回（return）一個代表失敗的退出碼 `3` 和這份錯誤報告。
         return (3, error_message)
 
-    # 如果成功，我們就把專家產出的「原材料」保存下來。
-    raw_material = p1.stdout
-
-    # --- 步驟 2: 調用 formatter.py (包裝線) ---
-    # 我們準備好「格式化專家（formatter.py）」的完整路徑。
-    formatter_script_path = os.path.join(project_root, 'src', 'core', 'formatter.py')
-    # 我們再次用「subprocess.run」來執行命令。
-    p2 = subprocess.run(
-        [sys.executable, formatter_script_path, "--strategy", "obsidian"],
-        input=raw_material,
-        text=True,
-        encoding='utf-8',
-        capture_output=True,
-        env=os.environ
-    )
-    # 我們再次用「if」來判斷返回碼。
-    if p2.returncode != 0:
-        # 如果失敗，就準備另一份錯誤報告。
-        error_message = f"【工人失敗】：格式化專家 (formatter.py) 執行失敗。\n--- 格式化專家錯誤報告 ---\n{p2.stderr.strip()}"
-        # 然後，返回（return）失敗碼 `3` 和錯誤報告。
-        return (3, error_message)
-
-    # 如果成功，我們就得到了最終的「成品」。
-    finished_product = p2.stdout
-    
-    # 所有步驟都順利完成，我們 返回（return）一個代表成功的退出碼 `0` 和我們的最終成品。
-    return (0, finished_product)
 
 # 我們用「if __name__ == '__main__'」這個結構來判斷，如果（if）這個腳本是直接被執行的...
+# TAG: COMPAT (相容性)
+# 我們保留這個 main 區塊，是為了確保即使有其他舊腳本試圖通過命令行調用它，它依然能工作。
+# 但在我們的新架構中，這個區塊實際上已經不會被 daemon.py 調用了。
 if __name__ == '__main__':
-    # 我們用「if」來判斷，如果（if）傳入的參數數量不等於 3...
     if len(sys.argv) != 3:
-        # 我們就用「print」在「標準錯誤（stderr）」中打印用法說明。
         print("用法: python worker.py <project_path> <target_doc>", file=sys.stderr)
-        # 然後用「sys.exit」以失敗碼 `1` 退出腳本。
         sys.exit(1)
     
-    # 我們從「系統參數列表（sys.argv）」中獲取參數。
     project_path_arg = sys.argv[1]
     target_doc_arg = sys.argv[2]
-    # 我們從「標準輸入（stdin）」中 讀取（read）所有內容。
     old_content_arg = sys.stdin.read()
     
-    # 我們調用我們的主要函式來執行工作流。
     exit_code, result = execute_update_workflow(project_path_arg, target_doc_arg, old_content_arg)
     
-    # 我們用「if」來判斷工作流是否成功。
     if exit_code == 0:
-        # 如果成功，就用「print」把結果打印到「標準輸出（stdout）」。
         print(result)
-    # 否則（else）...
     else:
-        # 就用「print」把錯誤報告打印到「標準錯誤（stderr）」。
         print(result, file=sys.stderr)
         
-    # 最後，我們用「sys.exit」以工作流返回的「退出碼」來退出整個腳本。
     sys.exit(exit_code)
