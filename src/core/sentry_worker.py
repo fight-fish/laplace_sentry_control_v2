@@ -133,20 +133,19 @@ def main():
     # --- 【v5.5 參數化改造】 ---
     # 1. 我們檢查從命令行傳入的參數（sys.argv）數量。
     #    列表的第一個元素是腳本名本身，所以我們期望總長度是 2。
-    if len(sys.argv) != 2:
+    if len(sys.argv) != 3:
         # 如果參數數量不對，我們就在「標準錯誤流」中打印用法，並以失敗碼退出。
-        print("用法: python sentry_worker.py <project_uuid>", file=sys.stderr)
+        print("用法: python sentry_worker.py <project_uuid> <project_path>", file=sys.stderr)
         sys.exit(1)
 
     # 2. 如果參數數量正確，我們就從列表中取出第二個元素，這就是我們需要的 UUID。
     project_uuid = sys.argv[1]
+    project_path_to_watch = sys.argv[2]
 
-    # 我們獲取專案的根目錄
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-    
         # 3. 我們在啟動日誌中，加入我們剛剛獲取的 project_uuid，以便驗證。
     print(f"哨兵工人已啟動。PID: {os.getpid()}。負責專案: {project_uuid}")
-    print(f"將使用「可靠輪詢」模式，監控目錄: {project_root}")
+    print(f"將使用「可靠輪詢」模式，監控目錄: {project_path_to_watch}")
+
     # 我們用 flush() 確保日誌被立刻打印出來，而不是被緩存。
     sys.stdout.flush()
 
@@ -158,7 +157,7 @@ def main():
 
     observer = PollingObserver(timeout=2)
     
-    observer.schedule(event_handler, project_root, recursive=True)
+    observer.schedule(event_handler, project_path_to_watch, recursive=True)
     
     observer.start()
 

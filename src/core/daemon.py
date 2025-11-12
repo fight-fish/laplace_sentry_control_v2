@@ -7,6 +7,7 @@ import os
 import sys
 import time
 from typing import Optional, Tuple, List, Dict, Any
+import subprocess
 
 # --- 【v4.0 依賴注入】 ---
 # 我們現在只導入我們需要的、真正屬於「專家」的工具。
@@ -32,6 +33,11 @@ if 'TEST_PROJECTS_FILE' in os.environ:
 else:
     # ...我們就使用正常的、生產環境下的文件路徑。
     PROJECTS_FILE = os.path.join(project_root, 'data', 'projects.json')
+
+# --- 【v5.0 哨兵管理】 ---
+# 理由：創建一個全局的「戶口名簿」，用來跟蹤所有正在運行的哨兵進程。
+# 它的鍵(key)是專案的 uuid，值(value)將是 subprocess.Popen 返回的進程對象。
+running_sentries: Dict[str, Any] = {}
 
 # --- 數據庫輔助函式 (現在由 I/O 網關代理) ---
 
@@ -139,10 +145,58 @@ def _run_single_update_workflow(project_path: str, target_doc: str, ignore_patte
 
 # --- 命令處理函式 ---
 
-# 處理「list_projects」命令。
+# 理由：為「列出專案」函式植入「PID存活性」+「路徑有效性」的雙重健康檢查。
 def handle_list_projects():
-    # 它只做一件事：調用我們自己的「read_projects_data」函式。
-    return read_projects_data()
+    projects_data = read_projects_data()
+    projects_with_status = []
+    
+    # 我們創建一個當前執勤哨兵的副本，以便在循環中安全地刪除元素。
+    sentry_uuids_to_check = list(running_sentries.keys())
+
+    # 我們先處理所有已註冊的專案，並為它們賦予初始狀態。
+    project_map = {p['uuid']: p for p in projects_data}
+    for uuid, project in project_map.items():
+        project['status'] = 'stopped' # 默認都是停止狀態
+
+    # 現在，我們開始遍歷所有正在執勤的哨兵，對他們進行體檢。
+    for uuid in sentry_uuids_to_check:
+        process = running_sentries.get(uuid)
+        if not process: continue # 如果在檢查過程中已被移除，就跳過。
+
+        # 我們從專案地圖中，獲取該哨兵對應的專案配置。
+        project_config = project_map.get(uuid)
+        
+        # 【健康檢查 1: PID 存活性】
+        is_alive = process.poll() is None
+        # 【健康檢查 2: 路徑有效性】
+        # 我們檢查專案配置是否存在，並且其 'path' 鍵對應的路徑是否是一個真實存在的目錄。
+        is_path_valid = project_config and os.path.isdir(project_config.get('path', ''))
+
+        # 如果哨兵活著，並且它監控的路徑也有效...
+        if is_alive and is_path_valid:
+            # ...我們才認為它是健康的「運行中」狀態。
+            if uuid in project_map:
+                project_map[uuid]['status'] = 'running'
+        else:
+            # 【殭屍自愈】只要上述兩個條件有任何一個不滿足，就視為「殭屍」！
+            print(f"【殭屍自愈】: 偵測到失效哨兵 (UUID: {uuid}, PID: {process.pid})。原因: "
+                f"進程存活={is_alive}, 路徑有效={is_path_valid}。正在清理...", file=sys.stderr)
+
+            try:
+                process.kill() # 強制終結殭屍進程
+            except Exception:
+                pass # 忽略終結過程中可能發生的錯誤（例如進程已經自己死了）
+            finally:
+                del running_sentries[uuid] # 將其從執勤名單中移除
+                
+                # 如果這個殭屍對應的專案還在我們的列表裡...
+                if uuid in project_map:
+                    # ...我們就將其狀態標記為「路徑失效」，以便前端顯示。
+                    project_map[uuid]['status'] = 'invalid_path'
+
+    # 最後，我們返回處理過的、帶有最新狀態的專案列表。
+    return list(project_map.values())
+
 
 # 處理「add_project」命令。
 def handle_add_project(args: List[str]):
@@ -329,6 +383,99 @@ def handle_manual_direct(args: List[str], ignore_patterns: Optional[set] = None)
 
     safe_read_modify_write(target_doc_path, update_md_callback, serializer='text')
 
+# 理由：為「啟動哨兵」函式填充真實的、帶有日誌管道和風險控制的 Popen 邏輯。
+def handle_start_sentry(args: List[str]):
+    if len(args) != 1:
+        raise ValueError("【啟動失敗】：需要 1 個參數 (uuid)。")
+    uuid_to_start = args[0]
+
+    # 我們檢查一下這個哨兵是不是已經在執勤了。
+    if uuid_to_start in running_sentries:
+        raise ValueError(f"專案的哨兵已經在運行中。")
+
+    # 我們讀取專案數據，找到對應的專案配置。
+    projects_data = read_projects_data()
+    project_config = next((p for p in projects_data if p.get('uuid') == uuid_to_start), None)
+
+    if not project_config:
+        raise ValueError(f"未找到具有該 UUID 的專案 '{uuid_to_start}'。")
+
+    project_name = project_config.get("name", "Unnamed_Project")
+    # 我們將專案名中的空格和特殊字符替換掉，以創建一個安全的文件名。
+    log_filename = "".join(c if c.isalnum() else "_" for c in project_name) + ".log"
+    log_dir = os.path.join(project_root, 'logs')
+    log_file_path = os.path.join(log_dir, log_filename)
+
+    # 我們確保 logs 目錄存在。
+    os.makedirs(log_dir, exist_ok=True)
+
+    # 我們定義要執行的命令。
+    sentry_script_path = os.path.join(project_root, 'src', 'core', 'sentry_worker.py')
+    # 【核心安全措施】我們不再依賴系統環境，而是明確指定使用當前運行的這個 Python 解釋器。
+    python_executable = sys.executable
+    project_path = project_config.get('path', '') # 獲取專案路徑
+
+    command = [python_executable, sentry_script_path, uuid_to_start, project_path]
+
+    try:
+        # 我們以「追加模式(a)」打開日誌文件。
+        log_file = open(log_file_path, 'a', encoding='utf-8')
+
+        print(f"【守護進程】: 正在為專案 '{project_name}' 啟動哨兵...")
+        print(f"【守護進程】: 命令: {' '.join(command)}")
+        print(f"【守護進程】: 日誌將被寫入: {log_file_path}")
+
+        # 【核心動作】我們使用 Popen 在背景啟動子進程。
+        # 我們將它的 stdout 和 stderr 都重定向到我們打開的日誌文件中。
+        process = subprocess.Popen(command, stdout=log_file, stderr=log_file, text=True)
+
+        # 【登記戶口】我們將這個新的進程對象，記錄到我們的「戶口名簿」中。
+        running_sentries[uuid_to_start] = process
+
+        print(f"【守護進程】: 哨兵已成功啟動。進程 PID: {process.pid}")
+
+    except Exception as e:
+        # 任何在啟動過程中發生的錯誤，都會被這個安全網捕獲。
+        raise RuntimeError(f"啟動哨兵子進程時發生致命錯誤: {e}")
+
+# 理由：為「停止哨兵」函式填充真實的、帶有日誌和錯誤處理的 terminate 邏輯。
+def handle_stop_sentry(args: List[str]):
+    if len(args) != 1:
+        raise ValueError("【停止失敗】：需要 1 個參數 (uuid)。")
+    uuid_to_stop = args[0]
+
+    # 我們先檢查一下這個哨兵是否在我們的「執勤名單」上。
+    if uuid_to_stop not in running_sentries:
+        raise ValueError(f"專案的哨兵並未在運行中，或從未被本程序啟動。")
+
+    # 從「戶口名簿」中，獲取該哨兵的「進程對象」。
+    process_to_stop = running_sentries[uuid_to_stop]
+    pid = process_to_stop.pid
+
+    print(f"【守護進程】: 正在嘗試停止哨兵 (PID: {pid})...")
+
+    try:
+        # 【核心動作】我們調用進程對象的 .terminate() 方法，向其發送終止信號。
+        process_to_stop.terminate()
+        # 我們等待一小段時間，給子進程一點反應時間來處理終止信號。
+        process_to_stop.wait(timeout=5)
+        print(f"【守護進程】: 哨兵 (PID: {pid}) 已成功發送終止信號。")
+
+    except subprocess.TimeoutExpired:
+        # 如果在 5 秒內，子進程還沒有終止，我們就採取更強硬的手段。
+        print(f"【守護進程警告】: 哨兵 (PID: {pid}) 未能在 5 秒內響應，將強制終止。")
+        process_to_stop.kill()
+        print(f"【守護進程】: 哨兵 (PID: {pid}) 已被強制終止。")
+
+    except Exception as e:
+        # 捕獲所有其他在終止過程中可能發生的意外。
+        raise RuntimeError(f"停止哨兵 (PID: {pid}) 時發生致命錯誤: {e}")
+
+    finally:
+        # 【註銷戶口】無論終止過程是否順利，我們都必須將它從「執勤名單」中移除。
+        # 這是為了防止產生「殭屍記錄」。
+        del running_sentries[uuid_to_stop]
+
 
 # --- 總調度中心 ---
 # 這個函式像一個電話總機，負責將來自命令行的指令，轉接到對應的處理函式。
@@ -361,6 +508,12 @@ def main_dispatcher(argv: List[str]):
             print("OK")
         elif command == 'manual_direct':
             handle_manual_direct(args)
+            print("OK")
+        elif command == 'start_sentry':
+            handle_start_sentry(args)
+            print("OK")
+        elif command == 'stop_sentry':
+            handle_stop_sentry(args)
             print("OK")
         else:
             print(f"錯誤：未知命令 '{command}'。", file=sys.stderr)

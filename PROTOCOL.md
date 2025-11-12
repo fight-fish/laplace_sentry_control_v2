@@ -1,3 +1,26 @@
+【提案 17.4 修訂版 v2：專業化版本描述】
+版本號： v8.1.0
+版本代號： Guardian
+版本類型： 功能與健-壯性更新 (Feature & Robustness Update)
+版本描述:
+本版本實現了完整的哨兵生命週期管理，並顯著增強了系統的狀態監控與容錯能力。通過對後端服務 daemon.py 的重構，引入了基於「進程存活性」與「路徑有效性」的雙重健康檢查機制，確保了狀態報告的準確性與持久性。前端 main.py 的交互流程也已同步升級，以支持對哨兵的菜單化管理和多維度狀態的可視化。
+✨ 核心變更 (Core Changes):
+【功能】哨兵生命週期管理:
+[新增] 在 daemon.py 中實現了 handle_start_sentry 和 handle_stop_sentry 函式，使用 subprocess.Popen 對 sentry_worker.py 子進程進行背景化管理。
+[新增] 實現了將子進程的 stdout 和 stderr 重定向到 logs/ 目錄下對應專案日誌文件的功能。
+[新增] 在 main.py 中，將哨兵管理操作（啟動/停止）集成到 _select_project 表格化選擇菜單中。
+【健壯性】狀態監控與自愈機制:
+[重構] 重構了 daemon.py 的 handle_list_projects 函式，對所有已註冊專案執行「路徑有效性」檢查，並對運行中的哨兵執行「PID 存活性」檢查。
+[新增] 引入了「殭屍自愈」邏輯：當健康檢查失敗時，系統會自動終止失效的子進程，並將其從 running_sentries 狀態字典中移除。
+[修正] 解決了 invalid_path 狀態無法持久化顯示的問題，確保了前端狀態與後端真實情況的一致性。
+[新增] 在 handle_start_sentry 中增加了對專案路徑的前置有效性驗證，防止啟動無效的哨兵進程。
+【修正與優化】:
+[修正] 修正了 sentry_worker.py 啟動日誌中，監控目錄路徑打印不準確的問題。
+[修正] 修正了因 handle_list_projects 內部邏輯不完善，導致在特定場景下返回數據無法被 main.py 正確解析的問題。
+🛠️ 技術性結論 (Technical Conclusions):
+狀態管理: 確立了由 handle_list_projects 作為系統狀態的唯一權威報告來源，所有狀態檢查與自愈邏輯均收斂於此。
+前後端契約: daemon.py 現在通過 status 欄位 (running, stopped, invalid_path)，向 main.py 提供了一套清晰、明確的狀態契約。
+
 # 《專案通訊協定書 v3.1 (基線版)》
 
 **文件 ID:** `LAPLACE-SENTRY-PROTOCOL-V3.1`

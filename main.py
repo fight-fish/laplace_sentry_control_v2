@@ -123,6 +123,7 @@ def _select_project(operation_name: str) -> Optional[Dict[str, Any]]:
     print(f"\n--- {operation_name} ---")
     exit_code, projects_json_str = _call_daemon_and_get_output(['list_projects'])
     
+
     if exit_code != 0:
         print("[前端]：獲取專案列表失敗！")
         return None
@@ -136,24 +137,43 @@ def _select_project(operation_name: str) -> Optional[Dict[str, Any]]:
         print("[前端]：解析後端返回的專案列表時出錯！")
         return None
 
-    # --- 表格化顯示邏輯 ---
-    headers = {"no": "編號", "name": "專案別名", "uuid": "UUID"}
+    # --- 【v5.5 狀態可視化】表格化顯示邏輯 ---
+    # 我們在表頭中，新增一個「狀態」欄位。
+    headers = {"status": "狀態", "no": "編號", "name": "專案別名"}
+
+    # 我們為不同的狀態，定義好對應的圖標。
+    status_icons = {
+        "running": "[✅ 運行中]",
+        "stopped": "[⛔️ 已停止]",
+        "invalid_path": "[❌ 路徑失效]",
+    }
+
+    # 【手術 1 核心】我們在計算寬度時，也要考慮狀態圖標的寬度。
     widths = {key: len(title) for key, title in headers.items()}
     for i, p in enumerate(projects):
+        status_text = status_icons.get(p.get('status'), "[❔ 未知]")
+        widths['status'] = max(widths['status'], len(status_text))
         widths['no'] = max(widths['no'], len(str(i + 1)))
         widths['name'] = max(widths['name'], len(p.get('name', '')))
-        widths['uuid'] = max(widths['uuid'], len(p.get('uuid', '')))
-    header_line = (f"  {headers['no']:<{widths['no']}}  "
-                f"| {headers['name']:<{widths['name']}}  "
-                f"| {headers['uuid']:<{widths['uuid']}}")
+
+    # 【手術 1 核心】我們在打印表頭時，也加入「狀態」這一列。
+    header_line = (f"  {headers['status']:<{widths['status']}}  "
+                f"| {headers['no']:<{widths['no']}}  "
+                f"| {headers['name']:<{widths['name']}}")
     print(header_line)
     print("-" * len(header_line))
+
+    # 【注意】這裡我們暫時還打印舊的、沒有狀態的行，這是正常的。
     for i, p in enumerate(projects):
-        row_line = (f"  {str(i + 1):<{widths['no']}}  "
-                    f"| {p.get('name', ''):<{widths['name']}}  "
-                    f"| {p.get('uuid', ''):<{widths['uuid']}}")
+        # 我們根據專案的 status，從圖標字典中獲取對應的圖標。
+        status_text = status_icons.get(p.get('status'), "[❔ 未知]")
+        # 【手術 2 核心】我們在打印每一行時，將狀態圖標放在最前面。
+        row_line = (f"  {status_text:<{widths['status']}}  "
+                    f"| {str(i + 1):<{widths['no']}}  "
+                    f"| {p.get('name', ''):<{widths['name']}}")
         print(row_line)
     # --- 表格化顯示結束 ---
+
     
     while True:
         try:
@@ -196,6 +216,9 @@ def _display_menu():
     print(" --- ")
     print("  4. 手動更新 (依名單)")
     print("  5. (調試)自由更新")
+    print(" --- 哨兵管理 ---")
+    print("  6. 啟動哨兵 (測試)")
+    print("  7. 停止哨兵 (測試)")
     print(" --- ")
     print("  9. 測試後端連接 (Ping)")
     print("  0. 退出程序")
@@ -276,6 +299,28 @@ def main():
                     _call_daemon_and_show_feedback(['manual_direct', project_path, target_doc])
                 else:
                     print("錯誤：兩個路徑都必須提供。")
+
+            # 【v5.6 正式版交互】
+            # 理由：將「啟動哨兵」，接入標準的、優雅的表格選擇流程。
+            elif choice == '6':
+                selected_project = _select_project("啟動哨兵")
+                if selected_project:
+                    uuid = selected_project.get('uuid')
+                    if uuid:
+                        _call_daemon_and_show_feedback(['start_sentry', uuid])
+                    else:
+                        print("錯誤：選中的專案缺少 UUID，無法操作。")
+
+            # 【v5.6 正式版交互】
+            # 理由：將「停止哨兵」，也接入標準的表格選擇流程。
+            elif choice == '7':
+                selected_project = _select_project("停止哨兵")
+                if selected_project:
+                    uuid = selected_project.get('uuid')
+                    if uuid:
+                        _call_daemon_and_show_feedback(['stop_sentry', uuid])
+                    else:
+                        print("錯誤：選中的專案缺少 UUID，無法操作。")
 
             else:
                 print(f"無效的選擇 '{choice}'。")
