@@ -146,56 +146,56 @@ def _run_single_update_workflow(project_path: str, target_doc: str, ignore_patte
 # --- 命令處理函式 ---
 
 # 理由：為「列出專案」函式植入「PID存活性」+「路徑有效性」的雙重健康檢查。
+
 def handle_list_projects():
     projects_data = read_projects_data()
-    projects_with_status = []
-    
-    # 我們創建一個當前執勤哨兵的副本，以便在循環中安全地刪除元素。
-    sentry_uuids_to_check = list(running_sentries.keys())
-
-    # 我們先處理所有已註冊的專案，並為它們賦予初始狀態。
     project_map = {p['uuid']: p for p in projects_data}
-    for uuid, project in project_map.items():
-        project['status'] = 'stopped' # 默認都是停止狀態
 
-    # 現在，我們開始遍歷所有正在執勤的哨兵，對他們進行體檢。
+    # 步驟 1: 先為所有專案設置一個默認的 'stopped' 狀態
+    for project in project_map.values():
+        project['status'] = 'stopped'
+
+    # 步驟 2: 然後，再進行無差別的路徑有效性檢查，覆蓋掉那些路徑失效的專案狀態
+    # --- 【ADHOC-002 巡邏升級】---
+    for project in project_map.values():
+        is_path_valid = os.path.isdir(project.get('path', ''))
+        if not is_path_valid:
+            project['status'] = 'invalid_path'
+    # --- 巡邏升級結束 ---
+
+    # 步驟 3: 最後，檢查正在運行的哨兵，將它們的狀態更新為 'running'
+    sentry_uuids_to_check = list(running_sentries.keys())
     for uuid in sentry_uuids_to_check:
         process = running_sentries.get(uuid)
-        if not process: continue # 如果在檢查過程中已被移除，就跳過。
+        if not process: continue
 
-        # 我們從專案地圖中，獲取該哨兵對應的專案配置。
         project_config = project_map.get(uuid)
         
-        # 【健康檢查 1: PID 存活性】
         is_alive = process.poll() is None
-        # 【健康檢查 2: 路徑有效性】
-        # 我們檢查專案配置是否存在，並且其 'path' 鍵對應的路徑是否是一個真實存在的目錄。
-        is_path_valid = project_config and os.path.isdir(project_config.get('path', ''))
+        # 【修正】這裡的 is_path_valid 檢查也需要更新，以反映最新的狀態
+        is_path_valid_for_running = project_config and project_config.get('status') != 'invalid_path'
 
-        # 如果哨兵活著，並且它監控的路徑也有效...
-        if is_alive and is_path_valid:
-            # ...我們才認為它是健康的「運行中」狀態。
+        if is_alive and is_path_valid_for_running:
             if uuid in project_map:
                 project_map[uuid]['status'] = 'running'
         else:
-            # 【殭屍自愈】只要上述兩個條件有任何一個不滿足，就視為「殭屍」！
+            # ... 殭屍自愈邏輯保持不變 ...
             print(f"【殭屍自愈】: 偵測到失效哨兵 (UUID: {uuid}, PID: {process.pid})。原因: "
-                f"進程存活={is_alive}, 路徑有效={is_path_valid}。正在清理...", file=sys.stderr)
-
+                f"進程存活={is_alive}, 路徑有效={is_path_valid_for_running}。正在清理...", file=sys.stderr)
             try:
-                process.kill() # 強制終結殭屍進程
+                process.kill()
             except Exception:
-                pass # 忽略終結過程中可能發生的錯誤（例如進程已經自己死了）
+                pass
             finally:
-                del running_sentries[uuid] # 將其從執勤名單中移除
-                
-                # 如果這個殭屍對應的專案還在我們的列表裡...
+                if uuid in running_sentries:
+                    del running_sentries[uuid]
                 if uuid in project_map:
-                    # ...我們就將其狀態標記為「路徑失效」，以便前端顯示。
-                    project_map[uuid]['status'] = 'invalid_path'
+                    # 即使是殭屍，也要確保它最終顯示為 'invalid_path' 如果路徑真的失效了
+                    if not (project_config and os.path.isdir(project_config.get('path', ''))):
+                        project_map[uuid]['status'] = 'invalid_path'
 
-    # 最後，我們返回處理過的、帶有最新狀態的專案列表。
     return list(project_map.values())
+
 
 
 # 處理「add_project」命令。
@@ -414,6 +414,16 @@ def handle_start_sentry(args: List[str]):
     # 【核心安全措施】我們不再依賴系統環境，而是明確指定使用當前運行的這個 Python 解釋器。
     python_executable = sys.executable
     project_path = project_config.get('path', '') # 獲取專案路徑
+
+    # --- 【ADHOC-002 啟動加固】在啟動前增加防爆牆 ---
+    if not project_path or not os.path.isdir(project_path):
+        raise IOError(f"【啟動失敗】: 專案 '{project_name}' 的監控路徑無效或不存在 -> {project_path}")
+# --- 防爆牆結束 ---
+
+    # 【v8.1.1 健壯性加固】
+    # 理由：在啟動子進程前，必須確保所有關鍵參數都有效。
+    if not project_path or not os.path.isdir(project_path):
+        raise ValueError(f"專案 '{project_config.get('name')}' 的路徑無效或不存在: '{project_path}'")
 
     command = [python_executable, sentry_script_path, uuid_to_start, project_path]
 
