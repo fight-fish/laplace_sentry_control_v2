@@ -2,11 +2,16 @@
 import sys
 import time
 import os
+import signal
 from typing import Dict
 # 我們從 watchdog 這個第三方庫中，導入我們需要的兩個核心組件。
 from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
-
+# 【TECH-DEBT-STATELESS-SENTRY 核心改造】
+# 理由：我們不希望哨兵工人在主控台被 Ctrl+C 關閉時，也跟著「殉職」。
+# 我們希望它能頑強地活下來，等待下一次主控台重啟時，被「狀態恢復」系統重新納管。
+# signal.SIG_IGN 是一個特殊的處理器，它告訴操作系統：「忽略這個信號，假裝什麼都沒發生。」
+signal.signal(signal.SIGINT, signal.SIG_IGN)
 # --- 【v5.0 核心改造】 ---
 # 我們在程式碼的頂部，定義一個名為「SENTRY_INTERNAL_IGNORE」的「絕對禁區」列表。
 # 這是一個元組（tuple），意味著它的內容是不可修改的，更加安全。

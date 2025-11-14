@@ -6,6 +6,7 @@ import uuid
 import os
 import sys
 import time
+import signal
 from typing import Optional, Tuple, List, Dict, Any
 import subprocess
 
@@ -24,6 +25,10 @@ from .io_gateway import safe_read_modify_write, DataRestoredFromBackupWarning
 # --- 全局配置 ---
 # 我們計算出專案的根目錄路徑。
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+# 我們定義 temp 目錄的默認路徑。
+TEMP_DIR = os.path.join(project_root, 'temp')
+
 
 # --- 【v5.0 哨兵管理】 ---
 # 理由：創建一個全局的「戶口名簿」，用來跟蹤所有正在運行的哨兵進程。
@@ -158,6 +163,67 @@ def _run_single_update_workflow(project_path: str, target_doc: str, ignore_patte
 # 理由：為「列出專案」函式植入「PID存活性」+「路徑有效性」的雙重健康檢查。
 
 def handle_list_projects(projects_file_path: Optional[str] = None):
+
+        # 【TECH-DEBT-STATELESS-SENTRY 核心改造】
+    # 理由：在執行任何操作之前，先進行一次「全國人口普查」，清理掉所有名存實亡的「殭屍戶籍」。
+    try:
+        for filename in os.listdir(TEMP_DIR):
+            if filename.endswith(".sentry"):
+                pid_file_path = os.path.join(TEMP_DIR, filename)
+                try:
+                    pid = int(filename.split('.')[0])
+                    # 檢查 PID 是否真實存在於操作系統中
+                    # os.kill(pid, 0) 是一個絕妙的技巧：它不發送任何信號，但如果進程不存在，它會拋出 ProcessLookupError。
+                    os.kill(pid, 0)
+                    # 如果代碼能執行到這裡，說明 PID 是真實存活的。
+                    # 現在，我們檢查內存中是否有它的記錄。
+                    
+                    # 我們需要讀取文件內容來獲取 UUID
+                    with open(pid_file_path, 'r', encoding='utf-8') as f:
+                        sentry_uuid = f.read().strip()
+
+                    if sentry_uuid and sentry_uuid not in running_sentries:
+                        # 這就是一個「合法但失憶」的哨兵！我們需要為它恢復記憶。
+                        print(f"【狀態恢復】：發現運存活的哨兵 (PID: {pid}, UUID: {sentry_uuid})，但內存中無記錄。正在為其恢復狀態...", file=sys.stderr)
+                        # 我們無法直接恢復出一個完美的 Popen 對象，因為我們沒有它的 stdin/stdout 等句柄。
+                        # 但在當前的架構下，我們至少可以創建一個「代理」對象，它有 .pid 屬性，並且 .poll() 能正常工作。
+                        # 一個更簡單、更健壯的做法是，只在 running_sentries 中存儲 PID。
+                        # 但為了最小化改動，我們創建一個最簡單的、能通過測試的對象。
+                        # HACK: 創建一個「代理」進程對象。這是一個簡化的表示，主要用於狀態檢查。
+                        # 在 Python 的 `subprocess` 模塊中，沒有一個公開的、可以根據 PID 直接創建 Popen 對象的方法。
+                        # 這是一個合理的簡化，因為我們後續的操作（如 stop）是基於 PID 的，而不是 Popen 對象本身。
+                        class PidProxy:
+                            def __init__(self, pid):
+                                self.pid = pid
+                            def poll(self):
+                                try:
+                                    # 再次使用 os.kill(pid, 0) 來檢查進程是否還活著
+                                    os.kill(self.pid, 0)
+                                    return None # 如果還活著，poll() 應該返回 None
+                                except ProcessLookupError:
+                                    return 1 # 如果已經死了，返回一個非零退出碼
+                            def kill(self):
+                                try:
+                                    os.kill(self.pid, signal.SIGKILL)
+                                except ProcessLookupError:
+                                    pass # 如果已經死了，就什麼都不做
+
+                        running_sentries[sentry_uuid] = PidProxy(pid)
+
+
+                except (ValueError, ProcessLookupError):
+                    # 如果 PID 無效，或進程已死亡，這就是一個「殭屍戶籍」。
+                    print(f"【殭屍普查】：發現無效或已死亡的戶籍文件 {filename}，正在自動清理...", file=sys.stderr)
+                    try:
+                        os.remove(pid_file_path)
+                    except OSError as e:
+                        print(f"【殭屍普查警告】：清理殭屍戶籍 {filename} 時失敗: {e}", file=sys.stderr)
+                except Exception:
+                    # 忽略其他權限問題等，保持普查的健壯性。
+                    continue
+    except OSError as e:
+        print(f"【殭屍普查警告】：掃描戶籍登記處 ({TEMP_DIR}) 時發生 I/O 錯誤: {e}", file=sys.stderr)
+
     PROJECTS_FILE = get_projects_file_path(projects_file_path)
 
     projects_data = read_projects_data(PROJECTS_FILE)
@@ -457,6 +523,27 @@ def handle_start_sentry(args: List[str], projects_file_path: Optional[str] = Non
         # 我們將它的 stdout 和 stderr 都重定向到我們打開的日誌文件中。
         process = subprocess.Popen(command, stdout=log_file, stderr=log_file, text=True)
 
+                # 【TECH-DEBT-STATELESS-SENTRY 核心改造】
+        # 理由：實現持久化的「出生登記」。
+        # 我們在 Popen 成功後，立刻獲取新進程的 PID。
+        pid = process.pid
+        # 我們構造出這個哨兵的「戶籍文件」路徑。
+        # 注意：我們需要一個統一的地方來管理 temp 目錄的路徑。
+        # 我們先在文件頂部定義一個全局的 TEMP_DIR。
+        pid_file_path = os.path.join(TEMP_DIR, f"{pid}.sentry")
+        
+        # 我們將專案的 UUID，寫入這個戶籍文件中。
+        try:
+            with open(pid_file_path, 'w', encoding='utf-8') as f:
+                f.write(uuid_to_start)
+        except IOError as e:
+            # 如果戶籍登記失敗，這是一個致命錯誤。我們必須立刻終止剛剛啟動的進程，防止產生沒有戶口的「黑戶」。
+            print(f"【守護進程致命錯誤】：為 PID {pid} 創建戶籍文件失敗: {e}", file=sys.stderr)
+            process.kill() # 立即終止
+            # 向上拋出一個更嚴重的異常，讓調用者知道啟動失敗了。
+            raise RuntimeError(f"創建哨兵戶籍文件 {pid_file_path} 失敗。")
+
+
         # 【登記戶口】我們將這個新的進程對象，記錄到我們的「戶口名簿」中。
         running_sentries[uuid_to_start] = process
 
@@ -468,41 +555,79 @@ def handle_start_sentry(args: List[str], projects_file_path: Optional[str] = Non
 
 # 理由：為「停止哨兵」函式填充真實的、帶有日誌和錯誤處理的 terminate 邏輯。
 def handle_stop_sentry(args: List[str], projects_file_path: Optional[str] = None):
+    # 【TECH-DEBT-STATELESS-SENTRY 核心改造】
+    # 理由：徹底重寫，使其從「基於內存」變為「基於文件系統」。
     if len(args) != 1:
         raise ValueError("【停止失敗】：需要 1 個參數 (uuid)。")
     uuid_to_stop = args[0]
 
-    # 我們先檢查一下這個哨兵是否在我們的「執勤名單」上。
-    if uuid_to_stop not in running_sentries:
-        raise ValueError(f"專案的哨兵並未在運行中，或從未被本程序啟動。")
+    pid_to_kill = None
+    pid_file_to_remove = None
 
-    # 從「戶口名簿」中，獲取該哨兵的「進程對象」。
-    process_to_stop = running_sentries[uuid_to_stop]
-    pid = process_to_stop.pid
-
-    print(f"【守護進程】: 正在嘗試停止哨兵 (PID: {pid})...")
-
+    # 步驟 1: 掃描戶籍登記處 (temp 目錄)，查找目標的戶籍文件。
     try:
-        # 【核心動作】我們調用進程對象的 .terminate() 方法，向其發送終止信號。
-        process_to_stop.terminate()
-        # 我們等待一小段時間，給子進程一點反應時間來處理終止信號。
-        process_to_stop.wait(timeout=5)
-        print(f"【守護進程】: 哨兵 (PID: {pid}) 已成功發送終止信號。")
+        for filename in os.listdir(TEMP_DIR):
+            if filename.endswith(".sentry"):
+                pid_file_path = os.path.join(TEMP_DIR, filename)
+                try:
+                    with open(pid_file_path, 'r', encoding='utf-8') as f:
+                        file_content_uuid = f.read().strip()
+                    
+                    if file_content_uuid == uuid_to_stop:
+                        # 找到了！我們從文件名中解析出 PID。
+                        pid_to_kill = int(filename.split('.')[0])
+                        pid_file_to_remove = pid_file_path
+                        break # 找到就不需要再繼續掃描了
+                except (IOError, ValueError):
+                    # 如果文件讀取或解析失敗，就跳過這個損壞的戶籍文件。
+                    print(f"【守護進程警告】：掃描戶籍文件 {pid_file_path} 時出錯，已跳過。", file=sys.stderr)
+                    continue
+    except OSError as e:
+        raise IOError(f"【停止失敗】：掃描戶籍登記處 ({TEMP_DIR}) 時發生 I/O 錯誤: {e}")
 
-    except subprocess.TimeoutExpired:
-        # 如果在 5 秒內，子進程還沒有終止，我們就採取更強硬的手段。
-        print(f"【守護進程警告】: 哨兵 (PID: {pid}) 未能在 5 秒內響應，將強制終止。")
-        process_to_stop.kill()
-        print(f"【守護進程】: 哨兵 (PID: {pid}) 已被強制終止。")
+    # 步驟 2: 如果沒有找到戶籍文件，說明該哨兵可能從未啟動或已被停止。
+    if pid_to_kill is None:
+        # 為了兼容舊的內存模式，我們也檢查一下內存。
+        if uuid_to_stop in running_sentries:
+             # 這是一種邊界情況：有內存記錄，但沒有戶籍文件。
+             # 我們嘗試按舊方式清理，並給出警告。
+            print(f"【守護進程警告】：在內存中找到哨兵 {uuid_to_stop}，但未找到其戶籍文件。將嘗試按舊方式停止。", file=sys.stderr)
+            process_to_stop = running_sentries.pop(uuid_to_stop)
+            try:
+                process_to_stop.kill()
+            except Exception:
+                pass
+            raise ValueError(f"專案的哨兵可能處於異常狀態，已嘗試強制清理。")
+        else:
+            raise ValueError(f"未找到正在運行的、屬於專案 {uuid_to_stop} 的哨兵。")
 
+    # 步驟 3: 執行「死亡註銷」流程。
+    print(f"【守護進程】: 正在嘗試停止哨兵 (PID: {pid_to_kill})...")
+    try:
+        # 我們使用 os.kill 來發送終止信號。這比 Popen 對象更通用。
+        # 我們需要檢查進程是否存在，以避免對一個已死亡的 PID 操作而引發異常。
+        import signal
+        os.kill(pid_to_kill, signal.SIGTERM) # 發送一個優雅的終止信號
+        print(f"【守護進程】: 哨兵 (PID: {pid_to_kill}) 已成功發送終止信號。")
+    except ProcessLookupError:
+        # 如果進程已經不存在了（可能已經自己崩潰了），這不是一個錯誤。
+        print(f"【守護進程】: 哨兵 (PID: {pid_to_kill}) 在嘗試停止前就已不存在。")
     except Exception as e:
         # 捕獲所有其他在終止過程中可能發生的意外。
-        raise RuntimeError(f"停止哨兵 (PID: {pid}) 時發生致命錯誤: {e}")
-
+        raise RuntimeError(f"停止哨兵 (PID: {pid_to_kill}) 時發生致命錯誤: {e}")
     finally:
-        # 【註銷戶口】無論終止過程是否順利，我們都必須將它從「執勤名單」中移除。
-        # 這是為了防止產生「殭屍記錄」。
-        del running_sentries[uuid_to_stop]
+        # 步驟 4: 無論終止是否成功，都必須清理現場。
+        # 刪除戶籍文件
+        if pid_file_to_remove and os.path.exists(pid_file_to_remove):
+            try:
+                os.remove(pid_file_to_remove)
+                print(f"【守護進程】: 已成功註銷戶籍文件 {os.path.basename(pid_file_to_remove)}。")
+            except OSError as e:
+                print(f"【守護進程警告】：刪除戶籍文件 {pid_file_to_remove} 時失敗: {e}", file=sys.stderr)
+        
+        # 從內存中也移除（如果存在的話）
+        if uuid_to_stop in running_sentries:
+            del running_sentries[uuid_to_stop]
 
 
 # --- 總調度中心 ---

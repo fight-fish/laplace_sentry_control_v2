@@ -47,9 +47,10 @@ class TestSentryPersistence(unittest.TestCase):
         # 4. 【核心安全機制】我們設置環境變數，將 daemon 的 I/O 操作重定向到我們的沙盒。
         os.environ['TEST_PROJECTS_FILE'] = self.TEST_PROJECTS_FILE
         
-        # 5. 我們清空 daemon 內存中可能殘留的、來自上一個測試的哨兵記錄。
-        #    這確保了每個測試的「戶口名簿」都是從零開始的。
-        daemon.running_sentries.clear()
+        # 5. 【ADHOC-006 時空校準】
+        # 理由：強制將 daemon 的臨時文件目錄，重定向到我們的沙盒中。
+        # 這確保了 daemon 創建的 .sentry 文件，會出現在我們的測試可以檢查到的地方。
+        daemon.TEMP_DIR = self.TEST_TEMP_DIR
 
     # 我們用「def tearDown」來定義一個特殊的「測試後清理」方法。
     # 在這個類中的「每一個」測試方法運行結束之後（無論成功還是失敗），
@@ -156,6 +157,166 @@ class TestSentryPersistence(unittest.TestCase):
         except Exception as e:
             self.fail(f"在測試清理階段，stop_sentry 意外崩潰: {e}")
 
+    def test_stop_sentry_removes_pid_file(self):
+        """
+        【TDD 核心測試】
+        驗證 handle_stop_sentry 是否能成功做到：
+        1. 終止對應的哨兵進程。
+        2. 刪除硬盤上對應的 PID 戶籍文件。
+        """
+        # --- 準備階段 (Arrange) ---
+        
+        # 1. 我們先執行一次「出生登記」，確保有一個活著的哨兵和一個戶籍文件。
+        #    為了不重複代碼，我們直接調用上一個測試，讓它幫我們完成準備工作。
+        #    這不是一個標準的單元測試做法，但在這裡，它可以讓我們的邏輯更清晰。
+        #    更好的做法是將準備邏輯提取到一個輔助函式中。
+        
+        # 偽造專案數據
+        fake_project_uuid = "uuid-for-stop-test"
+        fake_project_path = self.TEST_TEMP_DIR
+        initial_projects = [{"uuid": fake_project_uuid, "name": "停止測試專案", "path": fake_project_path, "output_file": ["/fake/path.md"]}]
+        with open(self.TEST_PROJECTS_FILE, 'w') as f:
+            json.dump(initial_projects, f)
+
+        # 啟動哨兵
+        try:
+            daemon.main_dispatcher(['start_sentry', fake_project_uuid])
+        except Exception as e:
+            self.fail(f"在 stop 測試的準備階段，start_sentry 意外崩潰: {e}")
+
+        # 確認哨兵已啟動，並獲取其 PID 和戶籍文件路徑
+        self.assertIn(fake_project_uuid, daemon.running_sentries, "準備階段：哨兵未被記錄到內存")
+        process = daemon.running_sentries[fake_project_uuid]
+        pid = process.pid
+        pid_file_path = os.path.join(self.TEST_TEMP_DIR, f"{pid}.sentry")
+        self.assertTrue(os.path.exists(pid_file_path), "準備階段：預期的戶籍文件未被創建！")
+
+        # --- 執行階段 (Act) ---
+        
+        # 2. 我們調用我們要測試的目標函式——「死亡註銷」。
+        try:
+            daemon.main_dispatcher(['stop_sentry', fake_project_uuid])
+        except Exception as e:
+            self.fail(f"handle_stop_sentry 在測試中意外崩潰: {e}")
+
+        # --- 斷言階段 (Assert) ---
+
+        # 3. 【斷言一：戶口名簿必須清空】
+        #    我們斷言 daemon 內存中的 running_sentries 字典，現在應該已經沒有這個哨兵了。
+        self.assertNotIn(fake_project_uuid, daemon.running_sentries, "哨兵記錄未從內存中的 running_sentries 移除")
+
+        # 4. 【斷言二：戶籍文件必須被刪除】
+        #    這是我們這次測試的核心！我們期望這個斷言會失敗（紅燈）。
+        self.assertFalse(os.path.exists(pid_file_path), f"戶籍文件 {pid_file_path} 在哨兵停止後，依然頑固地存在！")
+
+        # 5. 【斷言三：進程必須被終止】
+        #    我們給進程一點點時間來響應終止信號。
+        import time
+        time.sleep(0.1)
+        #    我們斷言進程的 poll() 方法不再返回 None，證明它已經結束了。
+        self.assertIsNotNone(process.poll(), f"PID 為 {pid} 的哨兵進程在停止後，依然在運行！")
+
+    def test_list_projects_cleans_up_zombie_pid_files(self):
+        """
+        【TDD 核心測試】
+        驗證 handle_list_projects 是否能自動清理掉無效的「殭屍」戶籍文件。
+        """
+        # --- 準備階段 (Arrange) ---
+        
+        # 1. 我們手動在戶籍登記處，創建一個假的、名存實亡的「殭屍戶籍」。
+        #    我們使用一個絕對不可能存在的 PID，例如 999999。
+        zombie_pid = 999999
+        zombie_uuid = "uuid-of-a-zombie-sentry"
+        zombie_pid_file_path = os.path.join(self.TEST_TEMP_DIR, f"{zombie_pid}.sentry")
+        
+        try:
+            with open(zombie_pid_file_path, 'w') as f:
+                f.write(zombie_uuid)
+        except IOError as e:
+            self.fail(f"在準備階段，創建殭屍戶籍文件時失敗: {e}")
+
+        # 2. 我們確認一下，這個「殭屍戶籍」現在確實存在於硬盤上。
+        self.assertTrue(os.path.exists(zombie_pid_file_path), "準備階段：殭屍戶籍文件未能成功創建！")
+
+        # --- 執行階段 (Act) ---
+        
+        # 3. 我們調用我們要測試的目標函式——「全國戶籍管理員」。
+        #    我們期望它在巡查時，能發現這個 PID 為 999999 的進程根本不存在，
+        #    然後主動將其對應的戶籍文件刪除。
+        try:
+            # 注意：list_projects 會返回一個 JSON 字符串，我們這裡只是調用它，不關心其返回值。
+            daemon.main_dispatcher(['list_projects'])
+        except Exception as e:
+            self.fail(f"handle_list_projects 在測試中意外崩潰: {e}")
+
+        # --- 斷言階段 (Assert) ---
+
+        # 4. 【斷言一：殭屍戶籍必須被清除】
+        #    這是我們這次測試的核心！我們期望這個斷言會失敗（紅燈）。
+        self.assertFalse(os.path.exists(zombie_pid_file_path), f"殭屍戶籍文件 {zombie_pid_file_path} 在戶籍管理員巡查後，依然陰魂不散！")
+
+    def test_list_projects_recovers_running_state(self):
+        """
+        【TDD 核心測試】
+        驗證 handle_list_projects 在程序「重啟」後，能從硬盤恢復哨兵的運行狀態。
+        """
+        # --- 準備階段 (Arrange) ---
+        
+        # 1. 我們先成功啟動一個哨兵，確保它在操作系統中真實運行，並且戶籍文件已創建。
+        fake_project_uuid = "uuid-for-recovery-test"
+        fake_project_path = self.TEST_TEMP_DIR
+        initial_projects = [{"uuid": fake_project_uuid, "name": "狀態恢復測試專案", "path": fake_project_path, "output_file": ["/fake/path.md"]}]
+        with open(self.TEST_PROJECTS_FILE, 'w') as f:
+            json.dump(initial_projects, f)
+
+        try:
+            daemon.main_dispatcher(['start_sentry', fake_project_uuid])
+        except Exception as e:
+            self.fail(f"在 recovery 測試的準備階段，start_sentry 意外崩潰: {e}")
+
+        # 確認哨兵已在內存和硬盤上都登記成功。
+        self.assertIn(fake_project_uuid, daemon.running_sentries, "準備階段：哨兵未被記錄到內存")
+        process = daemon.running_sentries[fake_project_uuid]
+        pid = process.pid
+        pid_file_path = os.path.join(self.TEST_TEMP_DIR, f"{pid}.sentry")
+        self.assertTrue(os.path.exists(pid_file_path), "準備階段：預期的戶籍文件未被創建！")
+
+        # 2. 【核心模擬】我們手動清空內存中的「戶口名簿」，模擬程序崩潰重啟。
+        #    現在，daemon 的內存裡是空的，但操作系統中，那個哨兵進程依然在頑強地運行著。
+        print(f"\n【測試模擬】：正在模擬程序崩潰，手動清空內存中的 running_sentries...")
+        daemon.running_sentries.clear()
+        self.assertEqual(len(daemon.running_sentries), 0, "模擬崩潰失敗，內存未被清空！")
+
+        # --- 執行階段 (Act) ---
+        
+        # 3. 我們調用「全國戶籍管理員」，期望它能在此次巡查中，發現那個「有戶籍、有本人，但沒在內存名單上」的合法公民。
+        try:
+            daemon.main_dispatcher(['list_projects'])
+        except Exception as e:
+            self.fail(f"handle_list_projects 在測試中意外崩潰: {e}")
+
+        # --- 斷言階段 (Assert) ---
+
+        # 4. 【斷言一：戶籍必須被恢復到內存中】
+        #    這是我們這次測試的核心！我們期望這個斷言會失敗（紅燈）。
+        self.assertIn(fake_project_uuid, daemon.running_sentries, "程序重啟後，哨兵的運行狀態未能從硬盤恢復到內存中！")
+        
+        # 5. 【斷言二：恢復的記錄必須正確】
+        #    我們進一步檢查，恢復到內存中的，是不是一個正確的 Popen 對象。
+        #    注意：我們無法直接比對 Popen 對象，但我們可以檢查它的 PID 是否正確。
+        recovered_process = daemon.running_sentries.get(fake_project_uuid)
+        self.assertIsNotNone(recovered_process, "恢復的哨兵記錄為 None！")
+        # 我們無法直接恢復 Popen 對象，但我們可以檢查恢復的是否是一個包含正確 PID 的記錄。
+        # 在未來的重構中，我們可能會將 running_sentries 的結構改為只存儲 PID。
+        # 但在當前階段，我們只斷言它被加回來了。
+        
+        # --- 清理階段 (Cleanup) ---
+        # 6. 為了不影響下一個測試，我們手動停止這個哨兵。
+        #    注意：現在我們必須依賴我們新寫的、基於文件系統的 stop_sentry。
+        try:
+            daemon.main_dispatcher(['stop_sentry', fake_project_uuid])
+        except Exception as e:
+            self.fail(f"在測試清理階段，stop_sentry 意外崩潰: {e}")
 
 
 # 這是一個 Python 的標準寫法。
