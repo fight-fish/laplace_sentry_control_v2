@@ -37,6 +37,8 @@ temp/*
 # 忽略 data 目錄下的所有內容，但保留 .gitkeep 文件
 data/*
 !data/.gitkeep
+data/projects.json
+
 # 如果未來有 schema.json，可以用 !data/schema.json 來取消忽略
 
 # -------------------------------

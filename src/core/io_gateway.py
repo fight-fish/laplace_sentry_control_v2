@@ -130,7 +130,12 @@ def safe_read_modify_write(
 
     except portalocker.LockException:
         raise IOError(f"無法獲取文件鎖...")
+    # 【核心改造】我們在這裡，專門捕獲由回調函式拋出的、已知的業務邏輯異常。
+    except ValueError as e:
+        # 當捕獲到它們時，我們必須用 raise 將其原封不動地、再次向上拋出！
+        raise e
     except Exception as e:
+        # 只有對於未知的、意外的錯誤，我們才將其包裝成一個通用的 IOError。
         raise IOError(f"執行安全讀寫事務時發生未知錯誤: {e}")
     finally:
         if temp_path and os.path.exists(temp_path):

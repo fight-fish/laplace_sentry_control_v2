@@ -24,26 +24,36 @@ from .io_gateway import safe_read_modify_write, DataRestoredFromBackupWarning
 # --- 全局配置 ---
 # 我們計算出專案的根目錄路徑。
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-# 我們用「if...in...」結構來判斷，如果（if）在「系統環境變數（os.environ）」這個大盒子裡，
-# 存在一個名叫「TEST_PROJECTS_FILE」的標籤...
-if 'TEST_PROJECTS_FILE' in os.environ:
-    # ...我們就用這個標籤對應的值，作為我們專案列表文件的路徑。
-    PROJECTS_FILE = os.environ['TEST_PROJECTS_FILE']
-# 否則（else）...
-else:
-    # ...我們就使用正常的、生產環境下的文件路徑。
-    PROJECTS_FILE = os.path.join(project_root, 'data', 'projects.json')
 
 # --- 【v5.0 哨兵管理】 ---
 # 理由：創建一個全局的「戶口名簿」，用來跟蹤所有正在運行的哨兵進程。
 # 它的鍵(key)是專案的 uuid，值(value)將是 subprocess.Popen 返回的進程對象。
 running_sentries: Dict[str, Any] = {}
 
+# --- 用下面的代碼，完整替換舊的 _get_projects_file_path ---
+def get_projects_file_path(provided_path: Optional[str] = None) -> str:
+    """
+    【權威路徑來源】
+    依賴注入的核心。優先使用外部提供的路徑。
+    如果未提供，則根據環境變數決定是返回測試路徑還是生產路徑。
+    """
+    if provided_path:
+        return provided_path
+    
+    if 'TEST_PROJECTS_FILE' in os.environ:
+        return os.environ['TEST_PROJECTS_FILE']
+    
+    # 我們需要 project_root，確保它在函式內部可見
+    project_root_for_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    return os.path.join(project_root_for_path, 'data', 'projects.json')
+
+
+
 # --- 數據庫輔助函式 (現在由 I/O 網關代理) ---
 
 # 我們用「def」來 定義（define）一個函式，名叫「read_projects_data」。
 # 它的作用是讀取專案列表。
-def read_projects_data() -> List[Dict[str, Any]]:
+def read_projects_data(file_path: str) -> List[Dict[str, Any]]:
     # TAG: DECOUPLE (解耦)
     # 這個函式現在的職責非常單純：它將「讀取」這個具體任務，完全委託給了 I/O 網關。
     try:
@@ -53,7 +63,7 @@ def read_projects_data() -> List[Dict[str, Any]]:
         
         # 【v4.1 核心修改】我們現在調用 I/O 網關，並準備接收一個元組作為返回結果。
         # 這個元組包含兩個部分：(處理後的數據, 是否從備份中恢復的標誌)
-        new_data, restored = safe_read_modify_write(PROJECTS_FILE, read_only_callback, serializer='json')
+        new_data, restored = safe_read_modify_write(file_path, read_only_callback, serializer='json')
         
         # 我們用「if」來判斷，如果（if）「已恢復」的標誌（restored）為 True...
         if restored:
@@ -75,7 +85,7 @@ def read_projects_data() -> List[Dict[str, Any]]:
 
 # 我們用「def」來 定義（define）一個函式，名叫「write_projects_data」。
 # 它的作用是將新的專案列表寫回文件。
-def write_projects_data(data: List[Dict[str, Any]]):
+def write_projects_data(data: List[Dict[str, Any]], file_path: str):
     # TAG: DECOUPLE (解耦)
     # 這個函式同樣將「寫入」任務，完全委託給了 I/O 網關。
     try:
@@ -85,7 +95,7 @@ def write_projects_data(data: List[Dict[str, Any]]):
         
         # 【v4.1 核心修改】我們同樣準備接收 I/O 網關返回的元組。
         # 在這裡，我們其實不關心寫入後的數據是什麼，所以可以用「_」來忽略它。
-        _, restored = safe_read_modify_write(PROJECTS_FILE, overwrite_callback, serializer='json')
+        _, restored = safe_read_modify_write(file_path, overwrite_callback, serializer='json')
         
         # 我們同樣檢查「已恢復」的標誌。
         if restored:
@@ -147,8 +157,10 @@ def _run_single_update_workflow(project_path: str, target_doc: str, ignore_patte
 
 # 理由：為「列出專案」函式植入「PID存活性」+「路徑有效性」的雙重健康檢查。
 
-def handle_list_projects():
-    projects_data = read_projects_data()
+def handle_list_projects(projects_file_path: Optional[str] = None):
+    PROJECTS_FILE = get_projects_file_path(projects_file_path)
+
+    projects_data = read_projects_data(PROJECTS_FILE)
     project_map = {p['uuid']: p for p in projects_data}
 
     # 步驟 1: 先為所有專案設置一個默認的 'stopped' 狀態
@@ -197,9 +209,9 @@ def handle_list_projects():
     return list(project_map.values())
 
 
+def handle_add_project(args: List[str], projects_file_path: Optional[str] = None):
+    PROJECTS_FILE = get_projects_file_path(projects_file_path)
 
-# 處理「add_project」命令。
-def handle_add_project(args: List[str]):
     if len(args) != 3:
         raise ValueError("【新增失敗】：參數數量不正確，需要 3 個。")
     
@@ -216,7 +228,7 @@ def handle_add_project(args: List[str]):
 
     if not validate_paths_exist([clean_path]):
         raise IOError(f"【新增失敗】：專案目錄路徑不存在 -> {clean_path}")
-    
+
     # 我們用「def」來 定義（define）一個「新增」的回調函式。
     # 它的所有邏輯，都將在 I/O 網關的安全鎖內被執行。
     def add_callback(projects_data):
@@ -242,8 +254,11 @@ def handle_add_project(args: List[str]):
     # 我們調用 I/O 網關，讓它去執行這個「新增」事務。
     safe_read_modify_write(PROJECTS_FILE, add_callback, serializer='json')
 
+
+
 # 處理「edit_project」命令。
-def handle_edit_project(args: List[str]):
+def handle_edit_project(args: List[str], projects_file_path: Optional[str] = None):
+    PROJECTS_FILE = get_projects_file_path(projects_file_path)
     if len(args) != 3:
         raise ValueError("【編輯失敗】：參數數量不正確。")
     
@@ -287,8 +302,9 @@ def handle_edit_project(args: List[str]):
     # 我們調用 I/O 網關，讓它去執行這個「編輯」事務。
     safe_read_modify_write(PROJECTS_FILE, edit_callback, serializer='json')
 
-# 處理「delete_project」命令。
-def handle_delete_project(args: List[str]):
+def handle_delete_project(args: List[str], projects_file_path: Optional[str] = None):
+    PROJECTS_FILE = get_projects_file_path(projects_file_path)
+
     if len(args) != 1:
         raise ValueError("【刪除失敗】：需要 1 個參數 (uuid)。")
     uuid_to_delete = args[0]
@@ -306,17 +322,17 @@ def handle_delete_project(args: List[str]):
     # 我們調用 I/O 網關，讓它去執行這個「刪除」事務。
     safe_read_modify_write(PROJECTS_FILE, delete_callback, serializer='json')
 
-# 處理「manual_update」命令。
-def handle_manual_update(args: List[str]):
+
+
+def handle_manual_update(args: List[str], projects_file_path: Optional[str] = None):
+    PROJECTS_FILE = get_projects_file_path(projects_file_path)
+
     if len(args) != 1:
         raise ValueError("【手動更新失敗】：需要 1 個參數 (uuid)。")
     uuid_to_update = args[0]
 
-    # TAG: HACK
-    # 這裡我們先「讀取」一次，是為了獲取專案的路徑配置。
-    # 這與後續的「寫入」是兩個獨立的事務，理論上存在競爭條件的風險，
-    # 但在單用戶操作場景下，風險極低。這是為了簡化邏輯而做出的權衡。
-    projects_data = read_projects_data()
+    projects_data = read_projects_data(PROJECTS_FILE)
+
     selected_project = next((p for p in projects_data if p.get('uuid') == uuid_to_update), None)
     
     if not selected_project:
@@ -357,7 +373,7 @@ def handle_manual_update(args: List[str]):
     safe_read_modify_write(target_doc_path, update_md_callback, serializer='text')
 
     # 處理「manual_direct」命令。
-def handle_manual_direct(args: List[str], ignore_patterns: Optional[set] = None):    
+def handle_manual_direct(args: List[str], ignore_patterns: Optional[set] = None, projects_file_path: Optional[str] = None):
     # (此函式邏輯與 handle_manual_update 高度相似，暫不重複註解以保持簡潔)
     if len(args) != 2:
         raise ValueError("【自由更新失敗】：需要 2 個參數 (project_path, target_doc_path)。")
@@ -383,8 +399,9 @@ def handle_manual_direct(args: List[str], ignore_patterns: Optional[set] = None)
 
     safe_read_modify_write(target_doc_path, update_md_callback, serializer='text')
 
-# 理由：為「啟動哨兵」函式填充真實的、帶有日誌管道和風險控制的 Popen 邏輯。
-def handle_start_sentry(args: List[str]):
+def handle_start_sentry(args: List[str], projects_file_path: Optional[str] = None):
+    PROJECTS_FILE = get_projects_file_path(projects_file_path)
+
     if len(args) != 1:
         raise ValueError("【啟動失敗】：需要 1 個參數 (uuid)。")
     uuid_to_start = args[0]
@@ -393,9 +410,10 @@ def handle_start_sentry(args: List[str]):
     if uuid_to_start in running_sentries:
         raise ValueError(f"專案的哨兵已經在運行中。")
 
-    # 我們讀取專案數據，找到對應的專案配置。
-    projects_data = read_projects_data()
+    projects_data = read_projects_data(PROJECTS_FILE)
+
     project_config = next((p for p in projects_data if p.get('uuid') == uuid_to_start), None)
+
 
     if not project_config:
         raise ValueError(f"未找到具有該 UUID 的專案 '{uuid_to_start}'。")
@@ -449,7 +467,7 @@ def handle_start_sentry(args: List[str]):
         raise RuntimeError(f"啟動哨兵子進程時發生致命錯誤: {e}")
 
 # 理由：為「停止哨兵」函式填充真實的、帶有日誌和錯誤處理的 terminate 邏輯。
-def handle_stop_sentry(args: List[str]):
+def handle_stop_sentry(args: List[str], projects_file_path: Optional[str] = None):
     if len(args) != 1:
         raise ValueError("【停止失敗】：需要 1 個參數 (uuid)。")
     uuid_to_stop = args[0]
@@ -489,7 +507,7 @@ def handle_stop_sentry(args: List[str]):
 
 # --- 總調度中心 ---
 # 這個函式像一個電話總機，負責將來自命令行的指令，轉接到對應的處理函式。
-def main_dispatcher(argv: List[str]):
+def main_dispatcher(argv: List[str], **kwargs):
     if not argv:
         print("錯誤：未提供任何命令。", file=sys.stderr)
         return 1
@@ -497,33 +515,38 @@ def main_dispatcher(argv: List[str]):
     command = argv[0]
     args = argv[1:]
 
+    # --- 【v9.1 依賴注入核心改造】 ---
+    # 我們用 .get() 方法，從 kwargs 字典中，安全地獲取 projects_file_path。
+    # 如果找不到，它會默認返回 None，這與我們之前的行為完全一致。
+    projects_file_path = kwargs.get('projects_file_path')
+
     try:
         # 我們用「if...elif...」結構，來根據指令（command）進行分派。
         if command == 'ping':
             print("PONG")
         elif command == 'list_projects':
-            projects = handle_list_projects()
+            projects = handle_list_projects(projects_file_path=projects_file_path)
             print(json.dumps(projects, indent=2, ensure_ascii=False))
         elif command == 'add_project':
-            handle_add_project(args)
+            handle_add_project(args, projects_file_path=projects_file_path)
             print("OK")
         elif command == 'edit_project':
-            handle_edit_project(args)
+            handle_edit_project(args, projects_file_path=projects_file_path)
             print("OK")
         elif command == 'delete_project':
-            handle_delete_project(args)
+            handle_delete_project(args, projects_file_path=projects_file_path)
             print("OK")
         elif command == 'manual_update':
-            handle_manual_update(args)
+            handle_manual_update(args, projects_file_path=projects_file_path)
             print("OK")
         elif command == 'manual_direct':
-            handle_manual_direct(args)
+            handle_manual_direct(args, projects_file_path=projects_file_path)
             print("OK")
         elif command == 'start_sentry':
-            handle_start_sentry(args)
+            handle_start_sentry(args, projects_file_path=projects_file_path)
             print("OK")
         elif command == 'stop_sentry':
-            handle_stop_sentry(args)
+            handle_stop_sentry(args, projects_file_path=projects_file_path)
             print("OK")
         else:
             print(f"錯誤：未知命令 '{command}'。", file=sys.stderr)
@@ -543,6 +566,10 @@ def main_dispatcher(argv: List[str]):
         return 10
 
     except (ValueError, IOError, RuntimeError) as e:
+                # 【核心改造】我們檢查一個特殊的環境變數，來判斷當前是否處於測試模式。
+        if 'LAPLACE_TEST_MODE' in os.environ:
+            # 如果是，我們就將捕獲到的異常，原封不動地向上拋出，讓 unittest 框架能接到。
+            raise e
         # 我們將捕獲到的異常信息，打印（print）到「標準錯誤流（stderr）」。
         print(str(e), file=sys.stderr)
         # 然後 返回（return）一個代表「業務邏輯錯誤」的退出碼 1。
