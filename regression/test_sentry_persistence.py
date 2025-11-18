@@ -318,6 +318,65 @@ class TestSentryPersistence(unittest.TestCase):
         except Exception as e:
             self.fail(f"在測試清理階段，stop_sentry 意外崩潰: {e}")
 
+    def test_list_projects_shows_muting_status(self):
+        """
+        【TDD 核心測試】
+        驗證 handle_list_projects 是否能正確讀取 .sentry_status 文件，
+        並將處於靜默狀態的專案標記為 'muting'。
+        """
+        # --- 準備階段 (Arrange) ---
+        
+        # 1. 我們先創建一個假的專案配置
+        fake_project_uuid = "uuid-for-muting-test"
+        fake_project_path = self.TEST_TEMP_DIR
+        initial_projects = [{
+            "uuid": fake_project_uuid,
+            "name": "靜默測試專案",
+            "path": fake_project_path,
+            "output_file": ["/fake/path.md"]
+        }]
+        with open(self.TEST_PROJECTS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(initial_projects, f)
+
+        
+        # 2. 我們手動創建一個 .sentry_status 文件，模擬哨兵發出的「靜默信號」
+        status_file_path = f"/tmp/{fake_project_uuid}.sentry_status"
+
+        muted_paths = ["/some/muted/file.txt", "/another/muted/dir"]
+        try:
+            with open(status_file_path, 'w', encoding='utf-8') as f:
+                json.dump(muted_paths, f)
+        except IOError as e:
+            self.fail(f"在準備階段，創建 .sentry_status 文件時失敗: {e}")
+        
+        # --- 執行階段 (Act) ---
+        
+        # 3. 我們調用 list_projects，期望它能讀取到我們剛剛創建的信號文件
+        try:
+            projects = daemon.handle_list_projects()
+        except Exception as e:
+            self.fail(f"handle_list_projects 在測試中意外崩潰: {e}")
+
+        
+        # --- 斷言階段 (Assert) ---
+        
+        # 4. 【斷言一：專案列表中必須包含我們的測試專案】
+        matching_projects = [p for p in projects if p.get('uuid') == fake_project_uuid]
+        self.assertEqual(len(matching_projects), 1, "專案列表中未找到測試專案！")
+        
+        # 5. 【斷言二：該專案的狀態必須是 'muting'】
+        project = matching_projects[0]
+        self.assertEqual(project.get('status'), 'muting', 
+                    f"專案狀態應為 'muting'，但實際為 '{project.get('status')}'")
+        
+        # --- 清理階段 (Cleanup) ---
+        # 6. 刪除我們創建的測試文件
+        try:
+            if os.path.exists(status_file_path):
+                os.remove(status_file_path)
+        except OSError:
+            pass  # 忽略清理失敗
+
 
 # 這是一個 Python 的標準寫法。
 # 它確保只有當這個文件被直接從命令行執行時，下面的代碼才會運行。

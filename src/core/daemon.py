@@ -290,6 +290,31 @@ def handle_list_projects(projects_file_path: Optional[str] = None):
                     if not (project_config and os.path.isdir(project_config.get('path', ''))):
                         project_map[uuid]['status'] = 'invalid_path'
 
+    # 步驟 4: 【任務 2.3.3】檢查哨兵的「靜默信號」，將處於靜默狀態的專案標記為 'muting'
+    for project in project_map.values():
+        uuid = project.get('uuid')
+        if not uuid:
+            continue
+        
+        # 構造 .sentry_status 文件的路徑（哨兵工人寫入到 /tmp/ 目錄）
+        status_file_path = f"/tmp/{uuid}.sentry_status"
+        
+        # 嘗試讀取文件
+        try:
+            if os.path.exists(status_file_path):
+                with open(status_file_path, 'r', encoding='utf-8') as f:
+                    muted_paths = json.load(f)
+                
+                # 只有當靜默列表非空，且專案狀態不是 'invalid_path' 時，才覆蓋為 'muting'
+                if isinstance(muted_paths, list) and len(muted_paths) > 0:
+                    if project.get('status') != 'invalid_path':
+                        project['status'] = 'muting'
+        except (json.JSONDecodeError, IOError) as e:
+            # 如果文件損壞或讀取失敗，我們選擇「靜默地忽略」，不影響其他狀態判定
+            print(f"【靜默狀態檢查警告】：讀取 {status_file_path} 時失敗: {e}", file=sys.stderr)
+            continue
+
+
     return list(project_map.values())
 
 
