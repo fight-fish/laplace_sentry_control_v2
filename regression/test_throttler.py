@@ -125,6 +125,42 @@ class TestSmartThrottler(unittest.TestCase):
         )
         print("【SmartThrottler 測試】: 『體積異常靜默』功能驗證通過！")
 
+    def test_basic_throttling_works(self):
+        """
+        【安全網測試】
+        驗證正常的、低頻的文件修改事件,不會觸發靜默機制。
+        """
+        print("\n【SmartThrottler 測試】: 正在驗證『正常事件不被誤判』...")
+        
+        throttler = SmartThrottler()
+        
+        target_file = "/path/to/project/src/utils.py"
+        
+        # 我們模擬一個正常的使用場景:
+        # 用戶在 10 秒內,只修改了同一個文件 3 次（低於 5 次的閾值）
+        with patch('os.stat') as mock_stat:
+            mock_stat.return_value.st_size = 2048  # 假設文件大小為 2KB
+            
+            for i in range(3):
+                event = FileModifiedEvent(src_path=target_file)
+                result = throttler.should_process(event)
+                # 每次都應該返回 True,表示允許處理
+                self.assertTrue(
+                    result,
+                    f"第 {i+1} 次正常修改事件被錯誤地拒絕了。"
+                )
+                time.sleep(2)  # 每次修改間隔 2 秒,模擬正常的編輯節奏
+        
+        # 【最終斷言】
+        # 我們斷言,在正常使用情況下,文件不應該被靜默
+        self.assertNotIn(
+            target_file,
+            throttler.muted_paths,
+            "正常的低頻修改事件,錯誤地觸發了靜默機制。"
+        )
+        print("【SmartThrottler 測試】: 『正常事件不被誤判』功能驗證通過!")
+
+
 
 # 這是一個 Python 的標準寫法。
 if __name__ == '__main__':

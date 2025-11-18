@@ -1,3 +1,21 @@
+
+版本號: v6.2.0 - The Signal Beacon (信號燈塔)
+版本類型: 功能增強與防禦機制強化 (Feature Enhancement & Defense Mechanism)
+版本日期: 2025-11-18
+版本描述:
+本版本實現了哨兵的狀態信號發射機制,為守護進程提供了讀取哨兵臨時行為狀態(如智能靜默的 muted_paths)的基礎設施。在開發過程中發現並修復了輸出文件修改事件可能觸發監控迴圈的關鍵缺陷,通過建立 OUTPUT-FILE-BLACKLIST 機制,確保了系統的長期穩定運行。
+✨ 核心功能 (Core Features):
+【信號發射機制】狀態郵箱系統:
+[實現] 在 sentry_worker.py 的 SentryEventHandler 中實現 _check_and_update_status_file 方法,當 muted_paths 發生變化時,自動將內容以 JSON 格式寫入 temp/<uuid>.sentry_status 文件。
+[驗證] 通過手動攻擊測試確認狀態文件能正確生成,內容格式符合預期。
+【關鍵修復】監控迴圈防護機制:
+[發現] 在測試過程中發現 output_file 的修改事件會被哨兵捕獲,可能觸發「監控迴圈」。
+[實現] 在 sentry_worker.py 中實現 OUTPUT-FILE-BLACKLIST 機制,在事件處理器中過濾掉 output_file 路徑的所有事件。
+[加固] 改造 daemon.py 的 handle_start_sentry,將 output_file 路徑傳遞給哨兵進程,確保黑名單機制生效。
+🛠️ 工程發現與結論 (Engineering Discoveries):
+防禦性設計: 確立了「在問題源頭進行防禦」的設計原則,通過在哨兵層面直接過濾輸出文件事件,從根本上杜絕監控迴圈的可能性。
+測試驅動發現: 再次證明了手動壓力測試在發現隱藏缺陷中的關鍵作用。
+
 版本號：v6.1.0 - The Vigilant Guardian (2025-11-18)
 版本類型： 健壯性與防禦機制強化 (Robustness & Defense Mechanism Enhancement)
 版本描述：

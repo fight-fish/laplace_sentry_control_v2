@@ -325,17 +325,21 @@ def handle_add_project(args: List[str], projects_file_path: Optional[str] = None
             if any(normalize_path(target) == clean_output_file for target in _get_targets_from_project(p)):
                 raise ValueError(f"目標文件 '{clean_output_file}' 已被專案 '{p.get('name')}' 使用。")
                     
-        # --- 【SELF-WRITE GUARD】禁止把 output_file / target_files 指向被監控的目錄 ---
-        abs_project_path = os.path.abspath(clean_path)
-        abs_out = os.path.abspath(clean_output_file)
+            abs_project_path = os.path.abspath(clean_path)
+            abs_out = os.path.abspath(clean_output_file)
 
-        if abs_out.startswith(abs_project_path):
-            raise ValueError(
-                f"【新增失敗】: output_file 指向被監控的專案路徑\n"
-                f"  ↳ 專案路徑: {abs_project_path}\n"
-                f"  ↳ 寫入路徑: {abs_out}\n"
-                f"為避免監控迴圈（寫入 → 事件 → 再寫入），已拒絕加入專案。"
-            )
+            abs_project_path = os.path.abspath(clean_path)
+            abs_out = os.path.abspath(clean_output_file)
+
+            # ✅ 只禁止寫進「哨兵自己專案」裡，不再禁止寫進被監控專案。
+            if is_self_project_path(abs_out):
+                raise ValueError(
+                    f"【新增失敗】: output_file 指向哨兵自身專案路徑\n"
+                    f"  ↳ 專案根目錄: {project_root}\n"
+                    f"  ↳ 寫入路徑: {abs_out}\n"
+                    f"為避免哨兵監控並改寫自身系統檔案，已拒絕加入專案。"
+                )
+
         
         # 我們創建一個新的專案「盒子（{}）」。
         new_project = {
@@ -388,18 +392,17 @@ def handle_edit_project(args: List[str], projects_file_path: Optional[str] = Non
             if not os.path.isabs(clean_new_output_file):
                 raise ValueError("新的目標文件路徑必須是絕對路徑。")
             
-            # --- 【新增】路徑衝突檢查 ---
             abs_project_path = os.path.abspath(project_to_edit['path'])
             abs_new_out = os.path.abspath(clean_new_output_file)
-            
-            if abs_new_out.startswith(abs_project_path + os.sep):
+
+            # ✅ 一樣只禁止寫進哨兵自身專案
+            if is_self_project_path(abs_new_out):
                 raise ValueError(
-                    f"【編輯失敗】: output_file 指向被監控的專案路徑\n"
-                    f"  ↳ 專案路徑: {abs_project_path}\n"
+                    f"【編輯失敗】: output_file 指向哨兵自身專案路徑\n"
+                    f"  ↳ 哨兵專案根目錄: {project_root}\n"
                     f"  ↳ 寫入路徑: {abs_new_out}\n"
-                    f"為避免監控迴圈（寫入 → 事件 → 再寫入），已拒絕修改。"
+                    f"為避免哨兵監控並改寫自身系統檔案，已拒絕修改。"
                 )
-            # --- 【結束】路徑衝突檢查 ---
 
             for p in other_projects:
                 if any(normalize_path(target) == clean_new_output_file for target in _get_targets_from_project(p)):
@@ -554,6 +557,15 @@ def handle_start_sentry(args: List[str], projects_file_path: Optional[str] = Non
         raise ValueError(f"專案 '{project_config.get('name')}' 的路徑無效或不存在: '{project_path}'")
 
     command = [python_executable, sentry_script_path, uuid_to_start, project_path]
+
+    # 【OUTPUT-FILE-BLACKLIST 機制】
+    # 理由:防止哨兵捕獲系統自身寫入 output_file 時產生的事件,避免監控迴圈。
+    # 我們從專案配置中讀取 output_file 列表,並將其作為參數傳遞給哨兵。
+    output_files = project_config.get('output_file', [])
+    # 我們將列表轉為逗號分隔的字符串,方便命令行傳遞。
+    output_files_str = ','.join(output_files) if output_files else ''
+    # 我們將這個字符串作為第三個參數添加到命令中。
+    command.append(output_files_str)
 
     try:
         # 我們以「追加模式(a)」打開日誌文件。

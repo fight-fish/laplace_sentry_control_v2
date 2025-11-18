@@ -5,7 +5,7 @@ import time
 import os
 import signal
 import json
-from typing import Set, Dict, List, Tuple
+from typing import Set, Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
 
 from watchdog.events import FileSystemEventHandler
@@ -32,7 +32,7 @@ class SmartThrottler:
             size_growth_period_seconds: float = 60.0):
         
                 # --- R1: 單檔過熱規則 ---
-        self.hot_threshold = 5                     # 同一檔案在時間窗內允許的最大事件數
+        self.hot_threshold = 3                     # 同一檔案在時間窗內允許的最大事件數
         self.hot_period = timedelta(seconds=5.0)   # 時間窗長度（秒）
         self.hot_events: Dict[str, List[datetime]] = {}  # {file_path: [timestamp1, ...]}
 
@@ -146,10 +146,13 @@ from src.core import daemon
 # SentryEventHandler: 哨兵事件處理器 (v9.1 - 重生版)
 # -----------------------------------------------------------------------------
 class SentryEventHandler(FileSystemEventHandler):
-    def __init__(self, throttler: SmartThrottler, project_uuid: str):
+    def __init__(self, throttler: SmartThrottler, project_uuid: str, output_file_paths: Optional[List[str]] = None):
         self.throttler = throttler
         self.project_uuid = project_uuid
         self._last_muted_paths_state: Set[str] = set()
+        # 【OUTPUT-FILE-BLACKLIST 機制】存儲輸出文件路徑的黑名單
+        self.output_file_paths = set(output_file_paths) if output_file_paths else set()
+
 
     def on_any_event(self, event):
         # 步驟 1: 【R5 規則：結構性防火牆】
@@ -161,6 +164,12 @@ class SentryEventHandler(FileSystemEventHandler):
             path_parts = normalized_path.split(os.sep)
             if any(part in SENTRY_INTERNAL_IGNORE for part in path_parts):
                 return # 靜默地、無情地忽略
+            
+        # 【OUTPUT-FILE-BLACKLIST 機制】過濾輸出文件的事件
+        # 理由:防止系統寫入 output_file 時觸發的事件,造成監控迴圈。
+        if normalized_path in self.output_file_paths:
+            return  # 靜默地忽略輸出文件的所有事件
+
 
         # 步驟 2: 調用全新的智能抑制器
         should_proceed = self.throttler.should_process(event)
@@ -203,12 +212,18 @@ class SentryEventHandler(FileSystemEventHandler):
 # main: 哨兵工人的主入口 (v9.1 - 重生版)
 # -----------------------------------------------------------------------------
 def main():
-    if len(sys.argv) != 3:
-        print("用法: python sentry_worker.py <project_uuid> <project_path>", file=sys.stderr)
+    if len(sys.argv) < 3 or len(sys.argv) > 4:
+        print("用法: python sentry_worker.py <project_uuid> <project_path> [output_files]", file=sys.stderr)
         sys.exit(1)
 
     project_uuid = sys.argv[1]
     project_path_to_watch = sys.argv[2]
+
+    # 【OUTPUT-FILE-BLACKLIST 機制】接收輸出文件黑名單
+    output_files_str = sys.argv[3] if len(sys.argv) == 4 else ''
+    # 我們將逗號分隔的字符串,拆分回列表。空字符串會得到空列表。
+    output_file_paths = [p.strip() for p in output_files_str.split(',') if p.strip()]
+
 
     if not os.path.exists(project_path_to_watch):
         print(f"錯誤: 監控路徑 '{project_path_to_watch}' 不存在。", file=sys.stderr)
@@ -218,10 +233,20 @@ def main():
     print(f"將使用「可靠輪詢」模式，監控目錄: {project_path_to_watch}")
     sys.stdout.flush()
 
+        # 【OUTPUT-FILE-BLACKLIST 診斷】顯示接收到的黑名單
+    if output_file_paths:
+        print(f"【OUTPUT-FILE-BLACKLIST】已加載 {len(output_file_paths)} 個輸出文件到黑名單:")
+        for path in output_file_paths:
+            print(f"  - {path}")
+    else:
+        print("【OUTPUT-FILE-BLACKLIST】未接收到任何輸出文件黑名單")
+    sys.stdout.flush()
+
+
     # 我們創建一個全新的、使用默認規則的 SmartThrottler
     throttler = SmartThrottler()
     
-    event_handler = SentryEventHandler(throttler=throttler, project_uuid=project_uuid)
+    event_handler = SentryEventHandler(throttler=throttler, project_uuid=project_uuid, output_file_paths=output_file_paths)
 
     observer = PollingObserver(timeout=2)
     observer.schedule(event_handler, project_path_to_watch, recursive=True)
