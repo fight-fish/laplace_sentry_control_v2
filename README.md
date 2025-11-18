@@ -40,6 +40,11 @@ python main.py
 
 **重要：** 所有直接調用後端的指令，都必須在專案的根目錄下，使用 `python -m <模塊路徑>` 的格式執行，以確保 Python 能夠正確處理模塊間的導入。
 
+攻擊測試指令
+
+ATTACK_FILE="attack_test.log"; echo ">>> 準備發起高頻寫入攻擊 <<<"; for i in $(seq 1 20); do echo "Attack wave $i" >> "$ATTACK_FILE"; sleep 0.05; done; echo ">>> 攻擊結束。請檢查哨兵日誌。 <<<"; rm "$ATTACK_FILE";
+
+
 #### 列出所有專案
 ```bash
 python -m src.core.daemon list_projects
@@ -84,29 +89,63 @@ python -m unittest regression/test_regression_suite_v8.py
 <!-- AUTO_TREE_START -->
 ```
 laplace_sentry_control_v2/
-├── data/                                      # 【數據區】存放專案運行所需的持久化資料 (已被 .gitignore 忽略)。
-│   └── projects.json                          # 【專案名單】以 JSON 格式記錄所有受監控專案與設定。
-├── logs/                                      # 【日誌區】存放哨兵運行時產生的日誌文件 (已被 .gitignore 忽略)。
-│   └── .gitkeep                               #  讓 Git 保留此空資料夾的佔位符。
-├── regression/                                # 【回歸測試套件】存放用於保證核心功能穩定性的自動化測試。
-│   ├── test_multiprocessing_communication.py  # (待辦) 用於測試多進程通信的腳本。
-│   ├── test_regression_suite_v8.py            # 【核心測試資產】v8 架構下的「增刪改查」完整生命週期回歸測試。
-│   └── test_sentry_persistence.py             #  用於測試哨兵持久化與重啟的腳本。
-├── src/                                       # 【源碼區】存放專案的所有核心程式碼。
-│   └── core/                                  # 【核心業務邏輯】
-│       ├── daemon.py                          # 【守護進程】作為後端服務，處理所有業務邏輯的總指揮官。
-│       ├── engine.py                          # 【結構專家】負責生成目錄結構樹的核心算法。
-│       ├── formatter.py                       # 【格式專家】(歷史資產) 負責格式化輸出內容。
-│       ├── io_gateway.py                      # 【I/O 網關】處理所有文件讀寫，並提供文件鎖，確保數據安全。
-│       ├── path.py                            # 【路徑專家】提供路徑淨化、驗證等工具。
-│       ├── sentry_worker.py                   # 【哨兵工人】被獨立啟動的背景進程，負責監控文件變化。
-│       └── worker.py                          # 【更新工人】被守護進程調用，執行單次的目錄掃描與文件更新。
-├── .gitignore                                 # 【Git 忽略列表】告訴 Git 哪些文件或目錄不應被納入版本控制。
-├── PROTOCOL.md                                # (歷史資產) 記錄了早期的設計決策與通信協議。
-├── README.md                                  # 【項目門面】您正在閱讀的、向世界介紹本專案的文件。
-├── main.py                                    # 【主入口】用戶交互的命令行界面 (CLI)，專案的唯一啟動入口。
-├── releases.md                                # 【版本發布記錄】記錄了每個版本的核心變更與重大決策。
-└── requirements.txt                           # 【依賴列表】定義了運行本專案所需的第三方 Python 庫。
+├── data/                                         # 【數據區】存放專案運行所需的持久化資料 (已被 .gitignore 忽略)。
+│   └── projects.json                             # 【專案名單】以 JSON 格式記錄所有受監控專案與設定。
+├── logs/                                         # 【日誌區】存放哨兵運行時產生的日誌文件 (已被 .gitignore 忽略)。
+│   ├── .gitkeep                                  # TODO: Add comment here
+│   ├── 自主開發.log                                  # TODO: Add comment here
+│   └── 自動目錄.log                                  # TODO: Add comment here
+├── regression/                                   # 【回歸測試套件】存放用於保證核心功能穩定性的自動化測試。
+│   ├── test_multiprocessing_communication.py     # (待辦) 用於測試多進程通信的腳本。
+│   ├── test_regression_suite_v8.py               # 【核心測試資產】v8 架構下的「增刪改查」完整生命週期回歸測試。
+│   ├── test_sentry_persistence.py                # TODO: Add comment here
+│   └── test_throttler.py                         # TODO: Add comment here
+├── src/                                          # 【源碼區】存放專案的所有核心程式碼。
+│   └── core/                                     # 【核心業務邏輯】
+│       ├── __init__.py                           # TODO: Add comment here
+│       ├── daemon.py                             # 【守護進程】作為後端服務，處理所有業務邏輯的總指揮官。
+│       ├── engine.py                             # 【結構專家】負責生成目錄結構樹的核心算法。
+│       ├── formatter.py                          # 【格式專家】(歷史資產) 負責格式化輸出內容。
+│       ├── io_gateway.py                         # 【I/O 網關】處理所有文件讀寫，並提供文件鎖，確保數據安全。
+│       ├── path.py                               # 【路徑專家】提供路徑淨化、驗證等工具。
+│       ├── sentry_worker.py                      # 【哨兵工人】被獨立啟動的背景進程，負責監控文件變化。
+│       ├── sentry_worker_backup.py               # TODO: Add comment here
+│       └── worker.py                             # 【更新工人】被守護進程調用，執行單次的目錄掃描與文件更新。
+├── temp/                                         # TODO: Add comment here
+│   ├── .gitkeep                                  # TODO: Add comment here
+│   ├── 1601868.sentry                            # TODO: Add comment here
+│   ├── 1649304.sentry                            # TODO: Add comment here
+│   ├── BDD Agent設計.md.20251118-134813.bak        # TODO: Add comment here
+│   ├── BDD Agent設計.md.20251118-134817.bak        # TODO: Add comment here
+│   ├── BDD Agent設計.md.20251118-134842.bak        # TODO: Add comment here
+│   ├── README.md.20251118-150221.bak             # TODO: Add comment here
+│   ├── README.md.20251118-150953.bak             # TODO: Add comment here
+│   ├── README.md.20251118-151506.bak             # TODO: Add comment here
+│   ├── projects.json.20251118-151730.bak         # TODO: Add comment here
+│   ├── projects.json.20251118-151757.bak         # TODO: Add comment here
+│   ├── projects.json.20251118-151845.bak         # TODO: Add comment here
+│   ├── tests_readme.md.20251118-094700.bak       # TODO: Add comment here
+│   ├── tests_readme.md.20251118-094702.bak       # TODO: Add comment here
+│   └── tests_readme.md.20251118-094704.bak       # TODO: Add comment here
+├── tests/                                        # TODO: Add comment here
+│   ├── tests/                                    # TODO: Add comment here
+│   │   └── test_daemon_to_worker_integration.py  # TODO: Add comment here
+│   ├── 35351                                     # TODO: Add comment here
+│   ├── fake_expert_sleeps.py                     # TODO: Add comment here
+│   ├── grg                                       # TODO: Add comment here
+│   ├── node_modules                              # TODO: Add comment here
+│   ├── readme                                    # TODO: Add comment here
+│   ├── test_atomic_write.py                      # TODO: Add comment here
+│   ├── test_daemon_integration.py                # TODO: Add comment here
+│   ├── test_file_lock.py                         # TODO: Add comment here
+│   ├── test_timeout.py                           # TODO: Add comment here
+│   ├── test_worker_workflow.py                   # TODO: Add comment here
+│   └── tests_readme.md                           # TODO: Add comment here
+├── .gitignore                                    # 【Git 忽略列表】告訴 Git 哪些文件或目錄不應被納入版本控制。
+├── PROTOCOL.md                                   # (歷史資產) 記錄了早期的設計決策與通信協議。
+├── README.md                                     # 【項目門面】您正在閱讀的、向世界介紹本專案的文件。
+├── main.py                                       # 【主入口】用戶交互的命令行界面 (CLI)，專案的唯一啟動入口。
+└── releases.md                                   # TODO: Add comment here
 ```
 <!-- AUTO_TREE_END -->
 ```

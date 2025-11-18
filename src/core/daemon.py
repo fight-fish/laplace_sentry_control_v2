@@ -29,6 +29,24 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..
 # 我們定義 temp 目錄的默認路徑。
 TEMP_DIR = os.path.join(project_root, 'temp')
 
+def is_self_project_path(path: str) -> bool:
+    """
+    判斷給定路徑是否位於 laplace_sentry_control_v2 專案內部。
+    用來避免「自我監控」。
+    """
+    abs_path = os.path.abspath(path)
+    root = project_root
+
+    # 統一補上結尾的分隔符，避免 /home/.../laplace_sentry_control_v2/tests
+    # 與 /home/.../laplace_sentry_control_v2 混在一起判斷錯誤。
+    if not root.endswith(os.sep):
+        root = root + os.sep
+
+    # 兩種情況都算「自己」：
+    # 1. 目標路徑剛好就是專案根目錄
+    # 2. 目標路徑位於專案根目錄之下（例如 .../laplace_sentry_control_v2/tests）
+    return abs_path == project_root or abs_path.startswith(root)
+
 
 # --- 【v5.0 哨兵管理】 ---
 # 理由：創建一個全局的「戶口名簿」，用來跟蹤所有正在運行的哨兵進程。
@@ -306,6 +324,18 @@ def handle_add_project(args: List[str], projects_file_path: Optional[str] = None
         for p in projects_data:
             if any(normalize_path(target) == clean_output_file for target in _get_targets_from_project(p)):
                 raise ValueError(f"目標文件 '{clean_output_file}' 已被專案 '{p.get('name')}' 使用。")
+                    
+        # --- 【SELF-WRITE GUARD】禁止把 output_file / target_files 指向被監控的目錄 ---
+        abs_project_path = os.path.abspath(clean_path)
+        abs_out = os.path.abspath(clean_output_file)
+
+        if abs_out.startswith(abs_project_path):
+            raise ValueError(
+                f"【新增失敗】: output_file 指向被監控的專案路徑\n"
+                f"  ↳ 專案路徑: {abs_project_path}\n"
+                f"  ↳ 寫入路徑: {abs_out}\n"
+                f"為避免監控迴圈（寫入 → 事件 → 再寫入），已拒絕加入專案。"
+            )
         
         # 我們創建一個新的專案「盒子（{}）」。
         new_project = {
@@ -357,6 +387,20 @@ def handle_edit_project(args: List[str], projects_file_path: Optional[str] = Non
             clean_new_output_file = normalize_path(new_value)
             if not os.path.isabs(clean_new_output_file):
                 raise ValueError("新的目標文件路徑必須是絕對路徑。")
+            
+            # --- 【新增】路徑衝突檢查 ---
+            abs_project_path = os.path.abspath(project_to_edit['path'])
+            abs_new_out = os.path.abspath(clean_new_output_file)
+            
+            if abs_new_out.startswith(abs_project_path + os.sep):
+                raise ValueError(
+                    f"【編輯失敗】: output_file 指向被監控的專案路徑\n"
+                    f"  ↳ 專案路徑: {abs_project_path}\n"
+                    f"  ↳ 寫入路徑: {abs_new_out}\n"
+                    f"為避免監控迴圈（寫入 → 事件 → 再寫入），已拒絕修改。"
+                )
+            # --- 【結束】路徑衝突檢查 ---
+
             for p in other_projects:
                 if any(normalize_path(target) == clean_new_output_file for target in _get_targets_from_project(p)):
                     raise ValueError(f"目標文件 '{clean_new_output_file}' 已被專案 '{p.get('name')}' 使用。")
@@ -589,8 +633,8 @@ def handle_stop_sentry(args: List[str], projects_file_path: Optional[str] = None
     if pid_to_kill is None:
         # 為了兼容舊的內存模式，我們也檢查一下內存。
         if uuid_to_stop in running_sentries:
-             # 這是一種邊界情況：有內存記錄，但沒有戶籍文件。
-             # 我們嘗試按舊方式清理，並給出警告。
+            # 這是一種邊界情況：有內存記錄，但沒有戶籍文件。
+            # 我們嘗試按舊方式清理，並給出警告。
             print(f"【守護進程警告】：在內存中找到哨兵 {uuid_to_stop}，但未找到其戶籍文件。將嘗試按舊方式停止。", file=sys.stderr)
             process_to_stop = running_sentries.pop(uuid_to_stop)
             try:
