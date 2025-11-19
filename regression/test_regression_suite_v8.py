@@ -6,10 +6,10 @@ import shutil
 import json
 from typing import List, Dict, Any
 
-# HACK: 為了能讓測試腳本，找到位於 src/core 目錄下的源碼，
-# 我們需要手動將專案的根目錄，添加到 Python 的「搜索路徑」中。
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-sys.path.insert(0, project_root)
+# HACK: 讓測試可以找到專案裡的 src/ 目錄
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 # 現在，我們可以安全地從 src.core 中，導入我們的「指揮官」模塊了。
 from src.core import daemon
@@ -20,7 +20,7 @@ class TestRegressionSuiteV8(unittest.TestCase):
 
     # --- 【v2 - 安全沙盒版】 ---
     # 我們定義一個類屬性，用來存放我們「一次性沙盒」的路徑。
-    TEST_WORKSPACE = os.path.join(project_root, 'tests', 'regression', 'test_workspace')
+    TEST_WORKSPACE = os.path.join(PROJECT_ROOT, 'tests', 'regression', 'test_workspace')
     TEST_DATA_DIR = os.path.join(TEST_WORKSPACE, 'data')
     TEST_TEMP_DIR = os.path.join(TEST_WORKSPACE, 'temp')
     TEST_PROJECTS_FILE = os.path.join(TEST_DATA_DIR, 'projects.json')

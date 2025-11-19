@@ -24,15 +24,17 @@
 
 本章定義了前端 (`main.py`) 與後端 (`daemon.py` 的 `main_dispatcher`) 之間，當前已實現的命令行風格指令。
 
-| 指令 (Command) | 參數 (Arguments) | 描述 | 成功響應 (stdout) |
-| :--- | :--- | :--- | :--- |
-| `ping` | (無) | 檢測後端服務是否可達。 | `PONG` |
-| `list_projects` | (無) | 獲取所有已註冊專案的列表，包含實時狀態。 | `[ { "name": "...", "status": "..." } ]` (JSON) |
-| `add_project` | `name` `path` `output_file` | 新增一個專案。 | `OK` |
-| `edit_project` | `uuid` `field` `new_value` | 修改一個現有專案。 | `OK` |
-| `delete_project` | `uuid` | 刪除一個指定的專案。 | `OK` |
-| `manual_update` | `uuid` | 手動觸發一次指定專案的更新。 | `OK` |
-| `manual_direct` | `project_path` `target_doc` | 直接對指定路徑執行一次更新。 | `OK` |
-| `start_sentry` | `uuid` | 為指定專案啟動背景監控哨兵。 | `OK` |
-| `stop_sentry` | `uuid` | 停止指定專案的背景監控哨兵。 | `OK` |
+|| 指令 (Command)          | 參數 (Arguments)              | 描述                                                                                               | 成功響應 (stdout)                                 |
+| --------------------- | --------------------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------- |
+| `ping`                | (無)                         | 檢測後端服務是否可達。                                                                                      | `PONG`                                        |
+| `list_projects`       | (無)                         | 獲取所有已註冊專案的列表（包含實時狀態）。                                                                            | JSON：`[ { "name": "...", "status": "..." } ]` |
+| `add_project`         | `name` `path` `output_file` | 新增一個專案。                                                                                          | `OK`                                          |
+| `edit_project`        | `uuid` `field` `new_value`  | 修改一個現有專案。                                                                                        | `OK`                                          |
+| `delete_project`      | `uuid`                      | 刪除指定專案。                                                                                          | `OK`                                          |
+| `manual_update`       | `uuid`                      | 手動觸發一次指定專案的更新。                                                                                   | `OK`                                          |
+| `manual_direct`       | `project_path` `target_doc` | 直接對指定路徑執行一次更新。                                                                                   | `OK`                                          |
+| `start_sentry`        | `uuid`                      | 為指定專案啟動背景監控哨兵。                                                                                   | `OK`                                          |
+| `stop_sentry`         | `uuid`                      | 停止指定專案的背景監控哨兵。                                                                                   | `OK`                                          |
+| `get_muted_paths`     | `uuid`                      | 讀取指定專案的暫存靜默路徑（`.sentry_status`），回傳目前被智能靜默標記的路徑列表。                                                | JSON：`["/path/one", "/path/two"]`             |
+| `add_ignore_patterns` | `uuid`                      | 依據暫存靜默路徑推導出可固化的 ignore patterns（例如 `logs`, `tmp`），並寫回 `projects.json`；成功固化後會刪除 `.sentry_status`。 | JSON：`["logs", "tmp"]`                        |
 

@@ -32,7 +32,7 @@ class SmartThrottler:
             size_growth_period_seconds: float = 60.0):
         
                 # --- R1: 單檔過熱規則 ---
-        self.hot_threshold = 3                     # 同一檔案在時間窗內允許的最大事件數
+        self.hot_threshold = 5                     # 同一檔案在時間窗內允許的最大事件數
         self.hot_period = timedelta(seconds=5.0)   # 時間窗長度（秒）
         self.hot_events: Dict[str, List[datetime]] = {}  # {file_path: [timestamp1, ...]}
 

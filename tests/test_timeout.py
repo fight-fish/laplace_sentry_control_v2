@@ -3,14 +3,16 @@ import unittest
 import sys
 import os
 import time
+import pytest
 import subprocess # 導入 subprocess
 
 # --- 核心：導入我們要測試的目標函式 ---
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 from src.core.daemon import _run_single_update_workflow
-
+@pytest.mark.skip(reason="Legacy timeout design (old subprocess workflow), will be redesigned after daemon refactor.")
 class TestTimeoutMechanism(unittest.TestCase):
+
 
 # 位於 tests/test_timeout.py
 

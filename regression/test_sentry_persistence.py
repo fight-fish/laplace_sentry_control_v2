@@ -5,13 +5,18 @@ import sys
 import shutil
 import json
 
+
 # HACK: 為了能讓測試腳本，找到位於 src/core 目錄下的源碼，
 # 我們需要手動將專案的根目錄，添加到 Python 的「搜索路徑」中。
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, project_root)
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 # 現在，我們可以安全地從 src.core 中，導入我們的「指揮官」模塊了。
 from src.core import daemon
+from src.core.daemon import handle_get_muted_paths, _get_status_file_path
+from src.core.daemon import get_projects_file_path, handle_add_ignore_patterns
+
 
 # 我們用「class」關鍵字，來定義一個我們自己的「測試案例集」。
 # 它繼承自 unittest.TestCase，這意味著它擁有執行測試的能力。
@@ -376,6 +381,88 @@ class TestSentryPersistence(unittest.TestCase):
                 os.remove(status_file_path)
         except OSError:
             pass  # 忽略清理失敗
+
+def test_get_muted_paths_reads_status_file():
+    """
+    確認 handle_get_muted_paths 會正確讀取 .sentry_status 的內容。
+    """
+    # 準備一個測試用的 UUID
+    uuid = "unit-test-muted-1"
+    status_path = _get_status_file_path(uuid)
+
+    # 建立一份假的靜默路徑列表
+    expected_paths = ["/a/b/c", "/x/y/z"]
+
+    # 寫入到 /tmp/<uuid>.sentry_status
+    with open(status_path, "w", encoding="utf-8") as f:
+        json.dump(expected_paths, f)
+
+    try:
+        # 呼叫我們剛剛實作的函式
+        result = handle_get_muted_paths([uuid])
+
+        # 驗證：內容應該完全一致（順序不重要，所以用 sorted）
+        assert sorted(result) == sorted(expected_paths)
+    finally:
+        # 測試結束後把狀態檔清掉，避免汙染其他測試
+        if os.path.exists(status_path):
+            os.remove(status_path)
+
+def test_add_ignore_patterns_and_cleans_up():
+    """
+    驗證 handle_add_ignore_patterns 是否能：
+    1. 正確從 .sentry_status 讀出靜默路徑
+    2. 正確推導 ignore_patterns
+    3. 正確寫回到 projects.json
+    4. 成功刪除 .sentry_status（清除臨時靜默狀態）
+    """
+
+    # --- 準備階段 (Arrange) ---
+
+    # 模擬專案 uuid
+    uuid = "unit-test-add-ignore"
+    status_file = _get_status_file_path(uuid)
+
+    # 模擬靜默訊號內容（會被 derive 轉成 ['logs', 'tmp']）
+    muted_paths = [
+        "/var/www/project/logs/error.log",   # → logs
+        "/var/www/project/tmp",              # → tmp
+    ]
+
+    with open(status_file, "w", encoding="utf-8") as f:
+        json.dump(muted_paths, f)
+
+    # 模擬 projects.json，注意 ignore_patterns 一開始沒有
+    projects_file = get_projects_file_path()
+    fake_projects = [
+        {
+            "uuid": uuid,
+            "name": "靜默封存測試專案",
+            "path": "/fake/path",
+            "output_file": ["/fake/out.md"]
+        }
+    ]
+    with open(projects_file, "w", encoding="utf-8") as f:
+        json.dump(fake_projects, f)
+
+    # --- 執行階段 (Act) ---
+    added_patterns = handle_add_ignore_patterns([uuid])
+
+    # --- 斷言階段 (Assert) ---
+
+    # 1. 檢查函式回傳的 patterns 是否正確
+    assert sorted(added_patterns) == ["logs", "tmp"]
+
+    # 2. 檢查 projects.json 是否已更新 ignore_patterns
+    with open(projects_file, "r", encoding="utf-8") as f:
+        updated_projects = json.load(f)
+
+    project = updated_projects[0]
+    assert sorted(project.get("ignore_patterns", [])) == ["logs", "tmp"]
+
+    # 3. 狀態檔應該被刪除
+    assert not os.path.exists(status_file), ".sentry_status 應該在封存後被刪除"
+
 
 
 # 這是一個 Python 的標準寫法。

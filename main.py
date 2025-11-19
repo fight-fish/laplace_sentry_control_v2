@@ -205,6 +205,69 @@ def _select_field_to_edit() -> Optional[str]:
                 print("無效的編號，請重新輸入。")
         except (ValueError, IndexError):
             print("輸入無效，請輸入列表中的數字編號。")
+
+def _audit_and_apply_suggestions():
+    """
+    審計哨兵建議（簡易 MVP 版）
+    1. 找到所有 status = 'muting' 的專案
+    2. 顯示它們的靜默路徑
+    3. 詢問是否要固化
+    4. 呼叫 daemon.add_ignore_patterns
+    """
+
+    print("\n=== 🛠 審查系統建議 (MVP 版) ===")
+
+    # 取得所有專案
+    projects = daemon.handle_list_projects()
+
+    # 找出靜默專案
+    muted_projects = [
+        p for p in projects
+        if p.get("status") == "muting"
+    ]
+
+    if not muted_projects:
+        print("✔ 目前沒有靜默中的專案，無需審查。\n")
+        return
+
+    print("\n以下專案偵測到靜默狀態：")
+    for idx, proj in enumerate(muted_projects, 1):
+        print(f"[{idx}] {proj['name']} ({proj['uuid']})")
+
+    choice = input("\n請選擇專案（輸入編號，或按 Enter 取消）: ").strip()
+    if not choice.isdigit():
+        print("已取消審查。\n")
+        return
+
+    index = int(choice) - 1
+    if index < 0 or index >= len(muted_projects):
+        print("無效的選擇。\n")
+        return
+
+    project = muted_projects[index]
+    uuid = project["uuid"]
+
+    # 讀取靜默路徑
+    muted_paths = daemon.handle_get_muted_paths([uuid])
+
+    print("程式發現以下被靜默的路徑：")
+    for i, p in enumerate(muted_paths, start=1):
+        print(f"  [{i}] {p}")
+
+    ok = input("\n是否要將這些路徑固化到 ignore_patterns？(y/N): ").strip().lower()
+    if ok != "y":
+        print("已取消固化。\n")
+        return
+
+    patterns = daemon.handle_add_ignore_patterns([uuid])
+
+    print("\n✔ 固化成功，新增的忽略規則為：")
+    for p in patterns:
+        print(f"  - {p}")
+
+    print("\n✔ 審查完成。\n")
+
+
 def _display_menu():
     """顯示主菜單 (v5.2 簡潔版)。"""
     print("\n" + "="*50)
@@ -220,6 +283,7 @@ def _display_menu():
     print("  6. 啟動哨兵 (測試)")
     print("  7. 停止哨兵 (測試)")
     print(" --- ")
+    print("  8. 審查系統建議")
     print("  9. 測試後端連接 (Ping)")
     print("  0. 退出程序")
     print("="*50)
@@ -321,6 +385,9 @@ def main():
                         _call_daemon_and_show_feedback(['stop_sentry', uuid])
                     else:
                         print("錯誤：選中的專案缺少 UUID，無法操作。")
+            
+            elif choice == '8':
+                _audit_and_apply_suggestions()
 
             else:
                 print(f"無效的選擇 '{choice}'。")

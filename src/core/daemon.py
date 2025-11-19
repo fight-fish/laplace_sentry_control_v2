@@ -175,6 +175,168 @@ def _run_single_update_workflow(project_path: str, target_doc: str, ignore_patte
         
     return (exit_code, result)
 
+def _get_status_file_path(sentry_uuid: str) -> str:
+    """
+    回傳指定哨兵 UUID 的 .sentry_status 狀態檔路徑。
+
+    哨兵在後端會把「當前靜默路徑列表」寫入 /tmp/<uuid>.sentry_status
+    後續所有功能都應透過此函式統一生成路徑。
+    """
+    return f"/tmp/{sentry_uuid}.sentry_status"
+
+def handle_get_muted_paths(args: List[str]) -> List[str]:
+    """
+    【審計接口】讀取指定哨兵的靜默路徑列表（純讀取，無副作用）。
+
+    - 參數: [uuid]
+    - 返回: List[str]
+    - 若狀態檔不存在 → 回傳空列表
+    """
+    # 基本參數檢查（保持你整份 daemon 的風格）
+    if len(args) != 1:
+        raise ValueError("handle_get_muted_paths 需要 1 個參數 (uuid)。")
+
+    sentry_uuid = args[0]
+    status_file = _get_status_file_path(sentry_uuid)
+
+    # 若檔案不存在 → 回傳空列表
+    if not os.path.exists(status_file):
+        return []
+
+    # 嘗試讀取 JSON
+    try:
+        with open(status_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        # 若讀取失敗 → 視為空列表（不拋例外，以保持穩定）
+        return []
+
+    # 防禦性保護：確保回傳為 List[str]
+    if not isinstance(data, list):
+        return []
+
+    return [p for p in data if isinstance(p, str)]
+
+def _derive_ignore_patterns_from_muted_paths(muted_paths: List[str]) -> List[str]:
+    """
+    根據靜默路徑列表，推導出要加入 ignore_patterns 的「名稱模式」清單。
+
+    策略：
+    - 如果最後一段看起來像「檔案」（包含 .）→ 取父目錄名稱
+      例：/foo/bar/logs/error.log  → logs
+    - 否則視為「目錄」→ 取最後一段本身
+      例：/foo/bar/tmp              → tmp
+    """
+    patterns: set[str] = set()
+
+    for raw in muted_paths:
+        if not isinstance(raw, str):
+            continue
+        path = raw.strip()
+        if not path:
+            continue
+
+        # 標準化路徑，消掉多餘的斜線
+        norm = os.path.normpath(path)
+        parent, base = os.path.split(norm)
+
+        if not base and parent:
+            # 類似 "/foo/bar/" 被 norm 成 "/foo/bar" 的極端情況
+            base = os.path.basename(parent)
+
+        if not base:
+            continue
+
+        # 有點的當成「檔案」→ 取父目錄名稱；沒有點的當成「目錄」→ 取自己
+        if "." in base and parent:
+            target_name = os.path.basename(parent) or base
+        else:
+            target_name = base
+
+        if target_name:
+            patterns.add(target_name)
+
+    return sorted(patterns)
+
+
+def handle_add_ignore_patterns(args: List[str]) -> List[str]:
+    """
+    【審計接口】將當前哨兵的靜默路徑，永久化為 projects.json 內的 ignore_patterns。
+
+    - 參數: [uuid]
+    - 返回: 實際加入的 ignore_patterns 名稱列表（去重後）
+    """
+    if len(args) != 1:
+        raise ValueError("handle_add_ignore_patterns 需要 1 個參數 (uuid)。")
+
+    sentry_uuid = args[0]
+    status_file = _get_status_file_path(sentry_uuid)
+
+    # 1. 讀取靜默狀態檔（如果不存在，就當沒事發生）
+    if not os.path.exists(status_file):
+        return []
+
+    try:
+        with open(status_file, "r", encoding="utf-8") as f:
+            muted_paths = json.load(f)
+    except Exception:
+        muted_paths = []
+
+    if not isinstance(muted_paths, list):
+        muted_paths = []
+
+    # 2. 從靜默路徑推導出要寫入 ignore_patterns 的名稱
+    patterns_to_add = _derive_ignore_patterns_from_muted_paths(muted_paths)
+
+    # 如果什麼都推不出來，就順便把狀態檔清掉，避免卡永遠靜默
+    if not patterns_to_add:
+        try:
+            os.remove(status_file)
+        except OSError:
+            pass
+        return []
+
+    # 3. 寫回 projects.json —— 使用既有的 get_projects_file_path + safe_read_modify_write
+    projects_file_path = get_projects_file_path()
+
+    def _merge_ignore_patterns(projects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        在記憶體中，把 patterns_to_add 合併進對應專案的 ignore_patterns，
+        然後 safe_read_modify_write 會幫我們安全寫回硬碟。
+        """
+        for project in projects:
+            if project.get("uuid") == sentry_uuid:
+                existing = project.get("ignore_patterns")
+
+                if isinstance(existing, list):
+                    current = {str(x) for x in existing if isinstance(x, str)}
+                elif existing is None:
+                    current = set()
+                else:
+                    # 資料結構異常，就重建一份乾淨的
+                    current = set()
+
+                before = set(current)
+                current.update(patterns_to_add)
+
+                # 只有真的有新增時才回寫，避免不必要的 diff
+                if current != before:
+                    project["ignore_patterns"] = sorted(current)
+                break
+
+        return projects
+
+    # 實際執行安全讀寫（我們不需要使用返回值）
+    safe_read_modify_write(projects_file_path, _merge_ignore_patterns, serializer="json")
+
+    # 4. 清除狀態檔，代表這批靜默已經被「封存」到 ignore_patterns
+    try:
+        os.remove(status_file)
+    except OSError:
+        pass
+
+    return patterns_to_add
+
 
 # --- 命令處理函式 ---
 
@@ -754,6 +916,21 @@ def main_dispatcher(argv: List[str], **kwargs):
         elif command == 'stop_sentry':
             handle_stop_sentry(args, projects_file_path=projects_file_path)
             print("OK")
+        elif command == "get_muted_paths":
+            if not args:
+                print("錯誤：缺少 UUID 參數。", file=sys.stderr)
+                return 1
+            uuid = args[0]
+            result = handle_get_muted_paths([uuid])
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "add_ignore_patterns":
+            if not args:
+                print("錯誤：缺少 UUID 參數。", file=sys.stderr)
+                return 1
+            uuid = args[0]
+            result = handle_add_ignore_patterns([uuid])
+            print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             print(f"錯誤：未知命令 '{command}'。", file=sys.stderr)
             return 1

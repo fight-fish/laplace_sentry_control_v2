@@ -1,4 +1,35 @@
 
+版本號：v6.3.0 - The Auditor Bridge (2025-11-20)
+版本類型：智能靜默審計與規則固化 (Muting Audit & Rule Hardening)
+
+版本描述：
+本版本在 v6.2.0「信號郵箱」的基礎上，打通了從「暫時靜默」到「永久忽略規則」的完整審計流程。
+管理者可以透過前端 `[8] 審查系統建議` 直接檢視哨兵的靜默建議，選擇性將其固化為 `ignore_patterns`，
+從而將一次性的防禦反饋，沉澱為長期穩定的目錄樹防火牆。
+
+✨ 核心功能 (Core Features):
+
+【狀態讀取與審計入口】
+- [新增] 在 `daemon.py` 實作 `handle_get_muted_paths(uuid)`，讀取 `/tmp/<uuid>.sentry_status`，並以 JSON 陣列回傳靜默路徑。
+- [新增] 在 `handle_list_projects` 基礎上，支援 `status: "muting"` 標記，將處於暫時靜默中的專案清晰標出。
+
+【規則固化與清理】
+- [新增] 在 `daemon.py` 實作 `handle_add_ignore_patterns(uuid)`：
+  - 從靜默路徑推導出目錄名稱（如 `logs`, `tmp`）作為 ignore patterns。
+  - 更新 `projects.json` 中對應專案的 `ignore_patterns` 欄位。
+  - 成功固化後，自動刪除 `.sentry_status`，避免殘留暫存狀態。
+
+【前端審查流程】
+- [新增] 在 `main.py` 主菜單中新增 `[8] 審查系統建議`：
+  - 顯示所有 `status == "muting"` 的專案列表。
+  - 支援選擇單一專案，檢視其靜默路徑清單。
+  - 經人工確認後，一鍵固化為 `ignore_patterns`，並刷新專案狀態。
+
+🛠 工程結論：
+- 將「智能靜默」從黑盒行為升級為可審計、可選擇固化的防禦回路。
+- 將哨兵的短期自保行為，沉澱為長期的目錄規則，減少重複告警與操作噪音。
+
+
 版本號: v6.2.0 - The Signal Beacon (信號燈塔)
 版本類型: 功能增強與防禦機制強化 (Feature Enhancement & Defense Mechanism)
 版本日期: 2025-11-18
