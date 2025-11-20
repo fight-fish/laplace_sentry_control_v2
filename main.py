@@ -285,8 +285,78 @@ def _display_menu():
     print(" --- ")
     print("  8. 審查系統建議")
     print("  9. 測試後端連接 (Ping)")
+    print(" 10. 管理目錄樹忽略規則")
     print("  0. 退出程序")
     print("="*50)
+
+def _manage_ignore_patterns():
+    """管理單一專案的目錄樹忽略規則（全部用編號操作）。"""
+    selected_project = _select_project("管理目錄樹忽略規則")
+    if not selected_project:
+        return
+
+    uuid = selected_project.get("uuid")
+    name = selected_project.get("name", "")
+    if not uuid:
+        print("錯誤：選中的專案缺少 UUID，無法操作。")
+        return
+
+    while True:
+        try:
+            candidates = daemon.list_ignore_candidates_for_project(uuid)
+            current = set(daemon.list_ignore_patterns_for_project(uuid))
+        except Exception as e:
+            print(f"讀取忽略規則時發生錯誤：{e}")
+            return
+
+        print(f"\n=== 管理專案「{name}」的目錄忽略規則 ===\n")
+
+        if not candidates:
+            print("目前沒有可管理的名稱。")
+            return
+
+        for i, n in enumerate(candidates, start=1):
+            mark = "[✓]" if n in current else "[ ]"
+            print(f"  [{i}] {mark} {n}")
+
+        print("\n操作方式：")
+        print("  - 輸入編號或多個編號切換狀態，例如：1 或 1,3,5")
+        print("  - 輸入 a：新增一個新名稱並標記為忽略")
+        print("  - 輸入 q：保存並返回主選單")
+
+        choice = input("\n請輸入操作 > ").strip().lower()
+        if choice == "q":
+            return
+        elif choice == "a":
+            new_name = input("請輸入要新增的名稱（例：build, coverage, .cache）> ").strip()
+            if not new_name:
+                continue
+            current.add(new_name)
+        else:
+            if not choice:
+                continue
+            parts = [p.strip() for p in choice.split(",") if p.strip()]
+            for p in parts:
+                if not p.isdigit():
+                    print(f"無效的編號：{p}")
+                    continue
+                idx = int(p) - 1
+                if 0 <= idx < len(candidates):
+                    n = candidates[idx]
+                    if n in current:
+                        current.remove(n)
+                    else:
+                        current.add(n)
+                else:
+                    print(f"編號超出範圍：{p}")
+
+        try:
+            daemon.update_ignore_patterns_for_project(uuid, sorted(current))
+            print("已更新忽略規則。")
+        except Exception as e:
+            print(f"寫入忽略規則時發生錯誤：{e}")
+            return
+
 
 # --- 主執行區 ---
 
@@ -388,6 +458,9 @@ def main():
             
             elif choice == '8':
                 _audit_and_apply_suggestions()
+
+            elif choice == '10':
+                _manage_ignore_patterns()
 
             else:
                 print(f"無效的選擇 '{choice}'。")

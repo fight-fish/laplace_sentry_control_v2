@@ -337,6 +337,64 @@ def handle_add_ignore_patterns(args: List[str]) -> List[str]:
 
     return patterns_to_add
 
+SYSTEM_DEFAULT_IGNORE_NAMES = {".git", "__pycache__", ".venv", ".vscode"}
+
+def list_ignore_patterns_for_project(uuid: str, projects_file_path: Optional[str] = None) -> List[str]:
+    PROJECTS_FILE = get_projects_file_path(projects_file_path)
+    projects = read_projects_data(PROJECTS_FILE)
+    project = next((p for p in projects if p.get("uuid") == uuid), None)
+    if not project:
+        raise ValueError(f"未找到具有該 UUID 的專案 '{uuid}'。")
+    raw = project.get("ignore_patterns")
+    if isinstance(raw, list):
+        return sorted({str(x) for x in raw if isinstance(x, str)})
+    return []
+
+def list_ignore_candidates_for_project(uuid: str, projects_file_path: Optional[str] = None) -> List[str]:
+    PROJECTS_FILE = get_projects_file_path(projects_file_path)
+    projects = read_projects_data(PROJECTS_FILE)
+    project = next((p for p in projects if p.get("uuid") == uuid), None)
+    if not project:
+        raise ValueError(f"未找到具有該 UUID 的專案 '{uuid}'。")
+
+    candidates: set[str] = set()
+
+    # 1) 先放入目前已啟用的忽略名稱
+    current = list_ignore_patterns_for_project(uuid, projects_file_path=projects_file_path)
+    candidates.update(current)
+
+    # 2) 再從專案目錄第一層掃描資料夾名稱
+    project_path = project.get("path")
+    if isinstance(project_path, str) and os.path.isdir(project_path):
+        try:
+            for name in os.listdir(project_path):
+                full = os.path.join(project_path, name)
+                if os.path.isdir(full):
+                    candidates.add(name)
+        except OSError:
+            pass
+
+    # 3) 移除系統內建忽略名，避免混淆
+    candidates = {n for n in candidates if n not in SYSTEM_DEFAULT_IGNORE_NAMES}
+
+    return sorted(candidates)
+
+def update_ignore_patterns_for_project(uuid: str, new_patterns: List[str], projects_file_path: Optional[str] = None) -> None:
+    PROJECTS_FILE = get_projects_file_path(projects_file_path)
+
+    cleaned = sorted({str(x).strip() for x in new_patterns if str(x).strip()})
+
+    def _update(projects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        for p in projects:
+            if p.get("uuid") == uuid:
+                p["ignore_patterns"] = cleaned
+                break
+        else:
+            raise ValueError(f"未找到具有該 UUID 的專案 '{uuid}'。")
+        return projects
+
+    safe_read_modify_write(PROJECTS_FILE, _update, serializer="json")
+
 
 # --- 命令處理函式 ---
 
