@@ -1,94 +1,134 @@
-# src/core/worker.py
+# ==============================================================================
+# 工人專家 worker.py  （v2.0 - 純 Python 重生版）
+#
+# 職責：
+#   - 取代舊版 worker.sh，負責執行一次「生產 → 包裝」的完整更新流水線。
+#   - 與 engine.py 和 formatter.py 進行內部直接呼叫（不再經過 subprocess）。
+#   - 提供 execute_update_workflow 作為 daemon.py 的唯一入口。
+#
+# 設計原則：
+#   - 不持有任何全域狀態（stateless）。
+#   - 不執行任何檔案 I/O（所有 I/O 由 daemon 或 io_gateway 處理）。
+#   - 僅負責「純運算」：產生樹（engine）＋包裝文本（formatter）。
+#
+# TAG 類型：
+#   - HACK: 為了環境相容性或歷史遺留因素的必要技巧。
+#   - COMPAT: 為相容舊版腳本而暫時保留的接口。
+# ==============================================================================
 
-# 我們需要 導入（import）一系列 Python 內建的工具。
+
 import os
 import sys
 from io import StringIO
-# 我們從 typing 導入 Optional，因為新參數是可選的。
 from typing import Optional, Set
 
-# HACK: 這段程式碼是為了解決一個導入問題。
-# 我們用「if __name__ == '__main__'」這個結構來判斷，如果（if）這個腳本是直接被執行的...
+# ------------------------------------------------------------------------------
+# HACK: 專案根目錄導入修正（僅在直接執行 worker.py 時使用）
+#
+# WHY：
+#   - 允許工程師在終端直接執行：python worker.py ...
+#   - 在被 daemon.py 呼叫時，不會走這段（package 已存在）
+# ------------------------------------------------------------------------------
 if __name__ == '__main__' and __package__ is None:
-    # 我們就獲取當前腳本所在的目錄路徑。
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    # 然後獲取上上級目錄，也就是我們整個專案的根目錄。
     project_root = os.path.dirname(os.path.dirname(current_dir))
-    # 最後，我們把這個根目錄，插入（insert）到系統的「尋找路徑列表（sys.path）」的最前面。
     sys.path.insert(0, project_root)
 
-# --- 【v2.0 核心重構】 ---
-# 我們現在不再需要 subprocess，而是直接導入我們的專家模塊。
+# 工人專家僅依賴 engine（生產線）與 formatter（包裝線）
 from src.core import engine, formatter
 
-# 我們用「def」來 定義（define）一個我們自己的函式，名為「執行更新工作流」。
+
+# ==============================================================================
+# execute_update_workflow: 工人主流程（daemon 專用接口）
+#
+# 請注意：
+#   - 工人不負責任何檔案讀寫（I/O），所有 I/O 已上移到 daemon.io_gateway。
+#   - 工人只負責「計算」：產生樹狀圖 → 套用 formatter 包裝。
+#
+# 流程：
+#   1. 調用 engine.generate_annotated_tree() 產生純內容（raw material）
+#   2. 透過 fake_stdin / fake_stdout 技巧安全執行 formatter.main()
+#   3. 回傳最終成品給 daemon，由 daemon 寫入檔案
+#
+# 回傳格式：
+#   (exit_code: int, output: str)
+#       exit_code = 0 → 成功
+#       exit_code = 3 → 工人內部未知錯誤
+# ==============================================================================
 def execute_update_workflow(
-    project_path: str, 
-    target_doc: str, 
-    old_content: str, 
-    ignore_patterns: Optional[Set[str]] = None  # <--- 核心改造點 1
-) -> tuple[int, str]:    
+    project_path: str,
+    target_doc: str,
+    old_content: str,
+    ignore_patterns: Optional[Set[str]] = None
+) -> tuple[int, str]:
     """
     【工人專家 v2.0 - 純 Python 版】
-    執行完整的「生產->包裝」更新流水線，所有專家均通過內部函式調用。
+    執行完整的「生產 → 包裝」更新流水線。
     """
     try:
-        # --- 步驟 1: 直接調用 engine.py (生產線) ---
-        # 我們在調用 engine 時，將接收到的 ignore_patterns 參數原封不動地傳遞下去。
+        # ----------------------------------------------------------------------
+        # 步驟 1：生產線（engine）
+        # ----------------------------------------------------------------------
         raw_material = engine.generate_annotated_tree(
-            project_path, 
+            project_path,
             old_content,
-            ignore_patterns=ignore_patterns # <--- 核心改造點 2
+            ignore_patterns=ignore_patterns
         )
 
-        # --- 步驟 2: 直接調用 formatter.py (包裝線) ---
-        # 我們使用在測試中被驗證過的「環境偽造」技巧，來安全地調用 formatter.main()。
+        # ----------------------------------------------------------------------
+        # 步驟 2：包裝線（formatter）
+        #
+        # 為了安全地呼叫 formatter.main()
+        # 我們創建 fake_stdin + fake_stdout 模擬一個完整 CLI 執行環境。
+        # ----------------------------------------------------------------------
         fake_stdin = StringIO(raw_material)
         fake_stdout = StringIO()
-        # 我們偽造一個符合 formatter 預期的命令行參數列表。
         fake_argv = ['formatter.py', '--strategy', 'obsidian']
 
-        # 我們備份並劫持系統的 I/O 和參數。
+        # 備份原本的系統 I/O 狀態
         original_stdin, original_stdout, original_argv = sys.stdin, sys.stdout, sys.argv
+
         try:
             sys.stdin, sys.stdout, sys.argv = fake_stdin, fake_stdout, fake_argv
-            # 在這個安全的「矩陣」中，執行 formatter 的 main 函式。
-            formatter.main()
-            # 從偽造的標準輸出中，獲取最終的「成品」。
+            formatter.main()  # 在隔離環境內安全執行 formatter
             finished_product = fake_stdout.getvalue()
         finally:
-            # 無論如何，都必須將系統狀態還原！
+            # 無論是否發生錯誤，均要確保 I/O 狀態恢復
             sys.stdin, sys.stdout, sys.argv = original_stdin, original_stdout, original_argv
-        
-        # 所有步驟都順利完成，我們 返回（return）一個代表成功的退出碼 `0` 和我們的最終成品。
+
+        # 工人成功完成任務
         return (0, finished_product.strip())
 
-    # 我們用一個全局的「except Exception」來捕獲任何在工作流中可能發生的未知錯誤。
     except Exception as e:
-        # 如果發生任何錯誤，我們就準備一份詳細的錯誤報告。
-        error_message = f"【工人失敗 v2.0】：在純 Python 工作流中發生意外錯誤。\n--- 錯誤詳情 ---\n{type(e).__name__}: {e}"
-        # 然後，返回（return）一個代表失敗的退出碼 `3` 和這份錯誤報告。
+        # 全域防護：確保所有錯誤都具備可觀察性
+        error_message = (
+            "【工人失敗 v2.0】：在純 Python 工作流中發生意外錯誤。\n"
+            f"--- 錯誤詳情 ---\n{type(e).__name__}: {e}"
+        )
         return (3, error_message)
 
 
-# 我們用「if __name__ == '__main__'」這個結構來判斷，如果（if）這個腳本是直接被執行的...
-# TAG: COMPAT (相容性)
-# 我們保留這個 main 區塊，是為了確保即使有其他舊腳本試圖通過命令行調用它，它依然能工作。
-# 但在我們的新架構中，這個區塊實際上已經不會被 daemon.py 調用了。
+# ==============================================================================
+# COMPAT：舊式 CLI 相容層
+#
+# WHY：
+#   - 保留給尚未更新的舊測試或舊腳本使用。
+#   - Daemon 不會再調用這段（新版已全面走 Python 內部流程）。
+# ==============================================================================
 if __name__ == '__main__':
     if len(sys.argv) != 3:
         print("用法: python worker.py <project_path> <target_doc>", file=sys.stderr)
         sys.exit(1)
-    
+
     project_path_arg = sys.argv[1]
     target_doc_arg = sys.argv[2]
     old_content_arg = sys.stdin.read()
-    
+
     exit_code, result = execute_update_workflow(project_path_arg, target_doc_arg, old_content_arg)
-    
+
     if exit_code == 0:
         print(result)
     else:
         print(result, file=sys.stderr)
-        
+
     sys.exit(exit_code)

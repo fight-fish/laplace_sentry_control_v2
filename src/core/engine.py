@@ -1,62 +1,166 @@
-# src/core/engine.py
+# ==============================================================================
+# 模組職責：engine.py
+# - 負責生成「目錄樹」的純文字結構，並與註釋資訊進行合併。
+# - 提供給 daemon / worker 調用的核心 API：generate_annotated_tree()。
+# - 不直接做任何檔案 I/O，相同輸入必須產生相同輸出（pure function）。
+#
+# 已知歷史與風險：
+# - 早期版本曾因相對路徑計算錯誤，導致註釋靜默丟失（參考相關日誌）。
+# - 現版本透過「路徑 key」模型與系統級忽略名單，盡量降低結構變動帶來的風險。
+# ==============================================================================
 
 # 我們需要導入（import）幾個 Python 內建的標準工具：
-import os       # 用於與「作業系統（os）」互動，如遍歷目錄。
-import sys      # 用於讀取「系統（sys）」參數和控制腳本退出。
-import re       # 用於執行強大的「正規表達式（re）」匹配。
+import os       # 用於與「作業系統（os）」互動，例如遍歷目錄、檢查檔案型態。
+import sys      # 用於讀取命令列參數，並在 CLI 模式下輸出錯誤訊息或設定退出碼。
+import re       # 用於執行必要的「正規表達式（re）」匹配或文字處理。
+from typing import List, Dict, Tuple, Optional, Set  # 提供清晰的型別標註（type hints）。
+
+# 每一行樹狀輸出，對應一個「視覺行內容」與一個「相對路徑 key」：
+# - line: 真正印在目錄樹上的那一行文字（例如 '├── src/core/engine.py'）。
+# - key : 對應的邏輯路徑（例如 'src/core/engine.py' 或 'src/core/'），
+#         用來在結構變動時，穩定地綁定和追蹤註釋。
+TreeNode = Tuple[str, Optional[str]]
+
+# 系統級預設忽略名單：
+# - 這些目錄／檔案名稱會在生成目錄樹時被自動排除。
+# - 即使使用者沒有在前端 UI 裡勾選，它們也不應出現在最終輸出中。
+# - 目的是隱藏各種測試快取、虛擬環境與工具產物，讓目錄樹保持乾淨、可閱讀。
+SYSTEM_DEFAULT_IGNORE: Set[str] = {
+    ".git",
+    "__pycache__",
+    ".venv",
+    ".vscode",
+    ".pytest_cache",
+    ".mypy_cache",
+}
 
 # ==============================================================================
 # 【v4.0 核心演算法】 - 註釋解析器 (回歸 v0 智慧)
 # ==============================================================================
 
-# 我們用「def」來 定義（define）一個內部使用的函式，名稱是「_parse_comments」。
-# 它的任務是：從一段舊的文字內容中，把之前寫好的註解解析出來，存入一個字典。
-def _parse_comments(content_string):
+def _visual_line_to_rel_path(visual_line: str, root_name: str) -> Optional[str]:
     """
-    【v4.0 - 回歸 v0 智慧】
-    使用最簡單、最可靠的「視覺匹配」策略來解析註解。
-    - Key:   整行的、不包含註解的、帶有樹狀符號的視覺路徑 (例如: '├── src/')
-    - Value: 註解內容 (例如: '【源碼區】...')
-    COMPAT: 這個策略雖然在面對格式變動時比較脆弱，但它從根本上杜絕了所有因「相對路徑計算」
-    而引發的、災難性的靜默失敗（參考日誌 025）。這是為了穩定性而做出的關鍵妥協。
+    將一行樹狀圖的「視覺文字」還原成相對路徑 key。
+    例如：
+        '├── src/'                -> 'src/'
+        '│   └── core/'           -> 'src/core/'
+        '│   │   └── engine.py'   -> 'src/core/engine.py'
     """
-    # DEFENSE: 如果傳入的內容是空的，就直接返回一個空字典。
+    line = visual_line.rstrip()
+
+    # 根節點特判：整行等於 root 名稱（例如 'laplace_sentry_control_v2/'）
+    if line == root_name:
+        return ""
+
+    # 只處理包含樹枝符號的行
+    branch_token = None
+    if "└── " in line:
+        branch_token = "└── "
+    elif "├── " in line:
+        branch_token = "├── "
+    else:
+        return None
+
+    branch_idx = line.index(branch_token)
+    # prefix 由若干個 '│   ' 或 '    ' 組成，每 4 個字元代表一層深度
+    depth = branch_idx // 4
+
+    # 取得節點名稱（含可能的結尾 '/'）
+    name = line[branch_idx + len(branch_token):]
+
+    # 用一個 stack 記錄各層資料夾名稱（都以 '/' 結尾）
+    if not hasattr(_visual_line_to_rel_path, "_dir_stack"):
+        _visual_line_to_rel_path._dir_stack = []  # type: ignore[attr-defined]
+    dir_stack = _visual_line_to_rel_path._dir_stack  # type: ignore[attr-defined]
+
+    # 如果當前深度小於等於 stack 長度，就先截斷
+    if depth <= len(dir_stack):
+        dir_stack[:] = dir_stack[:depth]
+
+    # 判斷是資料夾還是檔案
+    if name.endswith("/"):
+        # 資料夾：直接加入 stack
+        dir_stack.append(name)
+        rel_path = "".join(dir_stack)
+    else:
+        # 檔案：掛在當前資料夾 stack 之下
+        rel_path = "".join(dir_stack) + name
+
+    return rel_path
+
+from collections import defaultdict
+
+def _parse_comments_by_path(content_string: str, root_name: str) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """
+    從舊內容中解析出：
+        - path_comments:    { 相對路徑 -> 註解 }
+        - basename_comments:{ 檔名(唯一時) -> 註解 }
+
+    路徑優先，檔名只在「唯一」且路徑對不上時當作 fallback。
+    """
     if not content_string:
-        return {}
+        return {}, {}
 
-    comments = {}
+    path_comments: Dict[str, str] = {}
+    basename_bucket: Dict[str, list[str]] = defaultdict(list)
 
-    # 1. 我們用正規表達式，從完整的原始文件中，精準地提取出被標記包裹的目錄樹區塊。
-    tree_block_match = re.search(r"<!-- AUTO_TREE_START -->(.*?)<!-- AUTO_TREE_END -->", content_string, re.DOTALL)
+    tree_block_match = re.search(
+        r"<!-- AUTO_TREE_START -->(.*?)<!-- AUTO_TREE_END -->",
+        content_string,
+        re.DOTALL,
+    )
     if not tree_block_match:
-        return {} # 如果連標記都找不到，就沒什麼可解析的了。
+        return {}, {}
 
-    # HACK: 處理被 Obsidian 等工具自動包裹的 ` ``` ` 代碼塊。
-    # 我們需要先「拆掉」這個外包裝，才能拿到純淨的目錄樹內容。
     tree_block_raw = tree_block_match.group(1).strip()
     if tree_block_raw.startswith("```") and tree_block_raw.endswith("```"):
         content_to_parse = tree_block_raw[3:-3].strip()
     else:
         content_to_parse = tree_block_raw
 
-    # 2. 我們用「for...in...」結構，來逐行處理我們拿到的純淨目錄樹。
-    for line in content_to_parse.split('\n'):
-        # 我們只關心那些包含了註解符號 '#' 的行。
-        if '#' in line:
-            # 我們用 rsplit('#', 1) 這個精準的方法，從右邊開始，只切一刀。
-            # 這能完美地將「視覺路徑部分」和「註解部分」分開，即使註解本身也包含'#'。
-            parts = line.rsplit('#', 1)
-            if len(parts) == 2:
-                # Key 就是左邊的視覺路徑，並用 rstrip() 去掉尾部多餘的空格。
-                path_part = parts[0].rstrip()
-                # Value 就是右邊的註解內容，並用 strip() 去掉頭尾空格。
-                comment_part = parts[1].strip()
+    # 解析過程需要自己的「目錄 stack」，確保每次呼叫時是乾淨的
+    if hasattr(_visual_line_to_rel_path, "_dir_stack"):
+        delattr(_visual_line_to_rel_path, "_dir_stack")  # type: ignore[attr-defined]
 
-                # DEFENSE: 只有當路徑和註解都不是空的，我們才認為這是一條有效的記錄。
-                if path_part and comment_part:
-                    comments[path_part] = comment_part
+    for line in content_to_parse.split("\n"):
+        if "#" not in line:
+            continue
 
-    return comments
+        parts = line.rsplit("#", 1)
+        if len(parts) != 2:
+            continue
+
+        visual_part = parts[0].rstrip()
+        comment_part = parts[1].strip()
+
+        if not visual_part or not comment_part:
+            continue
+
+        # 略過自動產生的 TODO，不視為正式註解
+        if comment_part.startswith("TODO:"):
+            continue
+
+        rel_path = _visual_line_to_rel_path(visual_part, root_name)
+        if rel_path is None:
+            continue
+
+        path_comments[rel_path] = comment_part
+
+        # 收集 basename，之後只保留「唯一」者做 fallback
+        base = os.path.basename(rel_path.rstrip("/"))
+        if base:  # 根 ('') 沒有 basename
+            basename_bucket[base].append(rel_path)
+
+    # 建立「唯一檔名 -> 註解」對照表
+    basename_comments: Dict[str, str] = {}
+    for base, paths in basename_bucket.items():
+        if len(paths) == 1:
+            only_path = paths[0]
+            basename_comments[base] = path_comments[only_path]
+
+    return path_comments, basename_comments
+
+
 
 # ==============================================================================
 #  【v4.0 核心演算法】 - 結構生成器 (視覺穩定性優先)
@@ -65,59 +169,130 @@ def _parse_comments(content_string):
 # 這裡，我們用「def」來 定義（define）一個函式，名稱是「_generate_tree」。
 # 它的任務是：根據你電腦裡的真實檔案結構，生成一個視覺上穩定、準確的樹狀圖。
 # 我們為函式簽名增加一個新的、可選的參數 ignore_patterns
-def _generate_tree(root_path, folder_spacing=0, max_depth=None, ignore_patterns=None):
-    # 我們準備一個叫「lines」的空列表（list），用來收集樹狀圖的每一行。
-    lines = []
+def _generate_tree(
+    root_path: str,
+    folder_spacing: int = 0,
+    max_depth: Optional[int] = None,
+    ignore_patterns: Optional[Set[str]] = None,
+) -> Tuple[List[str], List[TreeNode]]:
+    """
+    產生目錄樹的純文字行列表，並同步產生每一行對應的相對路徑 key。
 
-    # 我們在函式內部，又定義（define）了一個遞迴輔助函式「recursive_helper」。
-    # 這是實現目錄遍歷的核心。
-    def recursive_helper(directory, prefix, depth, ignore_set):
-        if max_depth is not None and depth >= max_depth:
+    - tree_lines: 舊版使用的純文字樹狀行（保持相容）
+    - tree_nodes: 每一行搭配一個相對路徑 key（根或非節點則為 None）
+    """
+    lines: List[str] = []
+    nodes: List[TreeNode] = []
+
+    # 根節點顯示名稱，例如 "laplace_sentry_control_v2/"
+    root_name = os.path.basename(os.path.normpath(root_path)) + "/"
+
+    # 根節點：對外仍然保留原本的顯示形式
+    root_line = root_name
+    lines.append(root_line)
+    # 根的相對路徑 key 我們定義為空字串 ""
+    nodes.append((root_line, ""))
+
+    # 準備忽略名單：系統預設 + 使用者設定（聯集）
+    if ignore_patterns:
+        ignore_set: Set[str] = SYSTEM_DEFAULT_IGNORE | set(ignore_patterns)
+    else:
+        ignore_set = set(SYSTEM_DEFAULT_IGNORE)
+
+    def recursive_helper(
+        directory: str,
+        prefix: str,
+        depth: int,
+        rel_path: str,
+    ):
+        """
+        directory : 真實檔案系統路徑
+        prefix    : 樹狀圖的視覺前綴（由 '│   ' / '    ' 組成）
+        depth     : 當前深度（根為 0）
+        rel_path  : 目前相對於 root 的路徑字串（例如 'src/core/'）
+        """
+        # 深度限制檢查
+        if max_depth is not None and depth > max_depth:
             return
 
         try:
-            # --- 【v5.5 核心改造】 ---
-            # 我們現在不再使用寫死的 exclude_dirs，而是直接使用從外部傳入的 ignore_set。
-            items = [name for name in os.listdir(directory) if name not in ignore_set]
+            all_entries = os.listdir(directory)
         except FileNotFoundError:
-            print(f"【引擎警告】：在生成目錄樹時，找不到子目錄 '{directory}'，已跳過。", file=sys.stderr)
             return
 
-        entries = sorted(items, key=lambda name: (not os.path.isdir(os.path.join(directory, name)), name))
+        # 先套用忽略規則
+        visible_entries = [
+            name for name in all_entries
+            if name not in ignore_set
+        ]
 
-        for i, entry_name in enumerate(entries):
-            is_last = (i == len(entries) - 1)
-            path = os.path.join(directory, entry_name)
-            display_name = entry_name + "/" if os.path.isdir(path) else entry_name
-            line_content = f"{prefix}{('└── ' if is_last else '├── ')}{display_name}"
-            lines.append(line_content)
+        # VSCode 風格排序：
+        # 1. 資料夾永遠在前
+        # 2. 資料夾按字母排序
+        # 3. 檔案永遠在後
+        # 4. 檔案按字母排序
+        dirs: List[str] = []
+        files: List[str] = []
 
-            if os.path.isdir(path):
-                new_prefix = prefix + ("    " if is_last else "│   ")
-                # --- 【v5.5 核心改造】 ---
-                # 我們在進行遞迴調用時，也將 ignore_set 這個「忽略規則集」繼續傳遞下去。
-                recursive_helper(path, new_prefix, depth + 1, ignore_set)
-                if folder_spacing > 0 and not is_last:
-                    lines.append(prefix + "│   ")
+        for name in visible_entries:
+            full = os.path.join(directory, name)
+            if os.path.isdir(full):
+                dirs.append(name)
+            else:
+                files.append(name)
 
+        dirs.sort()
+        files.sort()
 
-    # 我們將根目錄本身作為樹的第一行。
-    lines.append(os.path.basename(root_path) + "/")
-    # --- 【v5.5 增量修改 1：引入合併邏輯】 ---
-    # 1. 我們定義一個基礎的、絕對不能被忽略的系統級黑名單。
-    SYSTEM_DEFAULT_IGNORE = {".git", "__pycache__", ".venv", ".vscode"}
+        # 最終順序：先資料夾，再檔案
+        entries = dirs + files
 
-    # 2. 我們檢查外部傳入的 ignore_patterns 是否不是 None。
-    if ignore_patterns is not None:
-        # 如果它不是 None，我們就用「並集（|）」操作，將其與我們的安全默認值合併。
-        final_ignore_set = ignore_patterns | SYSTEM_DEFAULT_IGNORE
-    else:
-        # 否則（例如，從手動更新調用時），我們就只使用我們的安全底線。
-        final_ignore_set = SYSTEM_DEFAULT_IGNORE
-        # 開始遞迴。
-    # 我們將計算好的 final_ignore_set，作為新的參數傳遞給遞迴函式。
-    recursive_helper(root_path, "", depth=0, ignore_set=final_ignore_set)
-    return lines
+        total = len(entries)
+        for idx, entry_name in enumerate(entries):
+            is_last = (idx == total - 1)
+            full_path = os.path.join(directory, entry_name)
+            is_dir = os.path.isdir(full_path)
+            display_name = entry_name + "/" if is_dir else entry_name
+
+            # 視覺樹狀行
+            branch = "└── " if is_last else "├── "
+            line = f"{prefix}{branch}{display_name}"
+            lines.append(line)
+
+            # 計算這一行對應的「相對路徑 key」
+            # rel_path 代表目前所在的資料夾路徑，例如 "src/core/"
+            if rel_path:
+                new_rel_path = rel_path + display_name
+            else:
+                new_rel_path = display_name
+
+            # 統一用 "/" 作為分隔符，資料夾保留結尾 "/"
+            if is_dir:
+                key = new_rel_path  # 已經有 "/"
+            else:
+                key = new_rel_path.rstrip("/")
+
+            # 樹狀圖裡這一行是一個節點，有對應的 path key
+            nodes.append((line, key))
+
+            # 如果是資料夾，遞迴進去
+            if is_dir:
+                child_prefix = prefix + ("    " if is_last else "│   ")
+                child_rel_path = key  # 對資料夾而言，key 已經是 "xxx/" 型式
+                recursive_helper(full_path, child_prefix, depth + 1, child_rel_path)
+
+        # 根層之間的空行（如果有設定）
+        if folder_spacing > 0 and depth == 1:
+            for _ in range(folder_spacing):
+                spacer = ""
+                lines.append(spacer)
+                nodes.append((spacer, None))
+
+    # 從 root 下層開始遞迴，根本身已經手動加入
+    recursive_helper(root_path, prefix="", depth=1, rel_path="")
+
+    return lines, nodes
+
 
 # ==============================================================================
 # 【v4.0 核心演算法】 - 註解合併器 (回歸 v0 智慧)
@@ -125,45 +300,64 @@ def _generate_tree(root_path, folder_spacing=0, max_depth=None, ignore_patterns=
 
 # 這裡，我們用「def」來 定義（define）一個函式，名稱是「_merge_and_align_comments」。
 # 它的任務是：把新生成的樹狀圖和從舊內容中解析出的註解，合併在一起並對齊。
-def _merge_and_align_comments(tree_lines, comments):
-    """
-    【v4.0 - 回歸 v0 智慧】
-    使用「視覺匹配」策略來合併註解。
-    """
-    final_lines = []
 
-    # 1. 我們先遍歷一次所有行，測量出最長的那一行的長度，這是為了後續的對齊。
+def _merge_and_align_comments_by_path(
+    tree_nodes: List[TreeNode],
+    path_comments: Dict[str, str],
+    basename_comments: Dict[str, str],
+) -> List[str]:
+    """
+    使用「路徑為 key」合併註釋，
+    若路徑對不上，且檔名在整棵樹中是唯一的，則回退使用「檔名為 key」。
+    """
+    final_lines: List[str] = []
+
+    # 1. 計算內容行最長長度（只看有 '──' 的行）
     max_len = 0
-    for line in tree_lines:
-        # 我們只測量那些看起來像是「內容」的行（包含樹狀符號）。
-        if '──' in line:
+    for line, _ in tree_nodes:
+        if "──" in line:
             max_len = max(max_len, len(line.rstrip()))
 
-    # 2. 我們再次遍歷所有行，這次是為了進行合併。
-    for line in tree_lines:
-        # 我們用當前這一行去掉尾部空格後的樣子，作為去註解字典裡查找的 Key。
+    used_paths: Set[str] = set()
+    used_basenames: Set[str] = set()
+
+    # 2. 逐行合併
+    for line, path_key in tree_nodes:
         stripped_line = line.rstrip()
 
-        # 我們用字典的 .get() 方法來查找註解，如果找不到，它會安全地返回 None。
-        comment = comments.get(stripped_line)
+        # 空白行或非節點行：原樣輸出
+        if path_key is None:
+            final_lines.append(line)
+            continue
+
+        is_root = (path_key == "")
+        comment: Optional[str] = None
+
+        # 優先：用完整路徑配對
+        if path_key in path_comments:
+            comment = path_comments[path_key]
+            used_paths.add(path_key)
+        else:
+            # 路徑配不到 → 嘗試用「唯一檔名」作為後備
+            base = os.path.basename(path_key.rstrip("/"))
+            if base and base in basename_comments and base not in used_basenames:
+                comment = basename_comments[base]
+                used_basenames.add(base)
 
         if comment:
-            # 如果找到了註解，我們就計算需要填充多少空格來實現對齊。
-            padding = ' ' * (max_len - len(stripped_line) + 2)
-            # 然後將「行內容 + 填充空格 + # + 註解」拼接起來。
+            padding = " " * (max_len - len(stripped_line) + 2)
             final_lines.append(f"{stripped_line}{padding}# {comment}")
         else:
-            # 如果沒找到註解，我們需要判斷一下。
-            # 只有當這一行是「內容行」時，我們才給它加上一個 TODO 標記。
-            if '──' in line:
-                padding = ' ' * (max_len - len(stripped_line) + 2)
-                # TODO: 這裡的提示文字未來可以做成可配置的。
+            # 沒註解的節點：依舊給 TODO（與舊版行為一致）
+            if "──" in line or is_root:
+                padding = " " * (max_len - len(stripped_line) + 2)
                 final_lines.append(f"{stripped_line}{padding}# TODO: Add comment here")
             else:
-                # 否則（比如是個用於間隔的空行），就保持原樣。
                 final_lines.append(line)
 
     return final_lines
+
+
 
 # ==============================================================================
 # 【v4.0 核心演算法】 - 總裝配線 (Public API)
@@ -172,20 +366,39 @@ def _merge_and_align_comments(tree_lines, comments):
 # 這裡，我們用「def」來 定義（define）一個公開的、可以從外部調用的主函式。
 # 它的任務是：按順序調用所有內部函式，完成一次完整的生成流程。
 # 我們同樣為這個公開的函式，增加一個可選的 ignore_patterns 參數
-def generate_annotated_tree(root_path, old_content_string: str | None = "None", folder_spacing=0, max_depth=None, ignore_patterns=None):
+def generate_annotated_tree(
+    root_path,
+    old_content_string: str | None = "None",
+    folder_spacing=0,
+    max_depth=None,
+    ignore_patterns=None,
+):
+    root_name = os.path.basename(os.path.normpath(root_path)) + "/"
 
-    # 1. 調用【v4.0 解析器】，傳入完整的舊內容，拿到註解字典。
-    comments = _parse_comments(old_content_string)
+    # 1. 解析舊內容中的註釋：路徑 + 檔名 fallback
+    path_comments, basename_comments = _parse_comments_by_path(
+        old_content_string or "",
+        root_name,
+    )
 
-    # 2. 調用【結構生成器】，拿到純淨的、視覺完美的目錄樹行列表。
-    # 我們將接收到的 ignore_patterns 參數，原封不動地傳遞給底層的 _generate_tree 函式
-    tree_lines = _generate_tree(root_path, folder_spacing=folder_spacing, max_depth=max_depth, ignore_patterns=ignore_patterns)
+    # 2. 產生最新的樹狀結構
+    tree_lines, tree_nodes = _generate_tree(
+        root_path,
+        folder_spacing=folder_spacing,
+        max_depth=max_depth,
+        ignore_patterns=ignore_patterns,
+    )
 
-    # 3. 調用【v4.0 合併器】，把新的樹狀圖和解析出來的註解合併並對齊。
-    final_tree_lines = _merge_and_align_comments(tree_lines, comments)
+    # 3. 基於 path + basename 合併註釋
+    final_tree_lines = _merge_and_align_comments_by_path(
+        tree_nodes,
+        path_comments,
+        basename_comments,
+    )
 
-    # 我們用「\n」（換行符）把列表中的所有行，連接（join）成一大段完整的文字，並返回。
     return "\n".join(final_tree_lines)
+
+
 
 # ==============================================================================
 #  主執行區 (Command-Line Interface)

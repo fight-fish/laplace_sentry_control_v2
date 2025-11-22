@@ -1,9 +1,16 @@
+# ==============================================================================
+# 模組職責：formatter.py
+# - 負責根據指令選擇適用的格式化策略
+# - 提供 obsidian/raw 等輸出風格的包裝能力
+# - 作為 CLI 工具，與外部管道串接以完成最終輸出格式統一
+#
+# 設計理念：
+# - 單一職責：只處理格式化，不涉入引擎邏輯
+# - 可擴展：FUTURE 可新增更多策略（typora / notion / html 等）
+# ==============================================================================
 
-# 為了讓我們的腳本能讀懂命令行指令，我們需要 導入（import）兩個 Python 內建的工具。
-# 「sys」工具可以幫助我們讀取從其他地方傳來的數據。
-import sys
-# 「argparse」工具則像一個專業的「指令翻譯官」。
-import argparse
+import sys       # 用於讀取從標準輸入傳來的資料。
+import argparse  # 專業的「指令翻譯官」，負責解析命令列參數。
 
 # 這裡，我們用「def」來 定義（define）一個我們這個腳本最主要的函式，名叫「main」。
 def main():
@@ -12,7 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description="為輸入的文本應用特定的格式化策略。")
     
     # 我們告訴翻譯官，我們需要一個名叫「--strategy」的參數。
-    # TAG: DEFENSE
+    # DEFENSE:
     # 「default='raw'」是一個防禦性設計。它確保了即使外部調用者忘記提供策略，
     # 我們的程式也不會崩潰，而是會執行一個安全的、預設的行為。
     parser.add_argument(
@@ -27,7 +34,7 @@ def main():
     # 我們用「sys」工具，從「標準輸入（stdin）」中，讀取（read）所有傳來的「原材料」內容。
     raw_content = sys.stdin.read()
 
-    # TAG: FUTURE
+    # FUTURE:
     # 這裡的「if...else...」結構是一個可擴展的設計。未來如果我們想支持
     # 新的筆記軟體（如 Typora 或 Notion），只需要在這裡增加新的「elif」判斷分支即可。
     # 我們用「if」來判斷，如果（if）指令中指定的策略（args.strategy）是「obsidian」...

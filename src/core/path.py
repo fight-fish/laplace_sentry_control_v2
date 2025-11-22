@@ -1,4 +1,14 @@
-# src/core/path.py
+# ==============================================================================
+# 模組職責：path.py
+# - 提供跨平台安全的路徑正規化（normalize_path）
+# - 提供基礎路徑存在性驗證（validate_paths_exist）
+# - 暴露簡單 CLI：read / write / validate / normalize / atomic_write
+#
+# 已知風險與歷史：
+# - atomic_write 現在由 io_gateway 接手，僅作為 CLI 兼容保留（見 COMPAT）
+# - 路徑正規化特別處理 WSL UNC 與 Windows 磁碟機路徑
+# ==============================================================================
+
 
 # 我們需要 導入（import）一系列 Python 內建的工具，來幫助我們與作業系統和命令行互動。
 import os       # 用於與「作業系統（os）」互動，如檢查路徑。
@@ -15,7 +25,7 @@ import time     # 用於處理「時間（time）」相關操作。
 # 它的作用是將各種亂七八糟的路徑，都「正規化」成我們系統內部統一的、乾淨的格式。
 def normalize_path(path_str):
     
-    # TAG: DEFENSE
+    # DEFENSE:
     # 為了防止後續操作因為接收到非字串而出錯，我們先做一個防禦性檢查。
     # 我們用「isinstance」來判斷，如果（if not）傳入的「path_str」不是一個「字串（str）」...
     if not isinstance(path_str, str):
@@ -25,7 +35,7 @@ def normalize_path(path_str):
     # 我們先用「strip()」方法，去掉路徑頭尾可能存在的空白字符。
     p = path_str.strip()
 
-    # TAG: HACK
+    # HACK:
     # 這是為了處理一個真實世界的「髒數據」問題：從 Windows 檔案總管複製的路徑，
     # 常常會被多層引號（如 "'...'"）包裹。
     # 我們用一個「while」循環，來不斷地「剝洋蔥」，直到最外層不再是引號。
@@ -37,7 +47,7 @@ def normalize_path(path_str):
     # 這確保了我們的路徑處理邏輯在跨平台時的兼容性。
     p = p.replace("\\", "/")
 
-    # TAG: HACK
+    # HACK:
     # 這是為了處理另一個真實世界的「髒數據」問題：來自 WSL 的 UNC 路徑。
     # 例如 `//wsl.localhost/Ubuntu/home/user`。
     # 我們用「re.match」和一段複雜的正規表達式，來精準地匹配這種特殊格式。
@@ -47,7 +57,7 @@ def normalize_path(path_str):
         # ...我們就丟掉前面的主機名，只保留後面的真實路徑部分。
         p = "/" + match_wsl.group(2)
 
-    # TAG: HACK
+    # HACK:
     # 這是為了處理 Windows 的磁碟機代號路徑，例如 `D:/Obsidian_Vaults/...`。
     match_drive = re.match(r"([A-Za-z]):/(.*)", p)
     if match_drive:
@@ -76,7 +86,7 @@ def validate_paths_exist(paths_to_check):
 
 # 處理「read」命令的邏輯。
 def handle_read(filepath):
-    # TAG: DEFENSE
+    # DEFENSE:
     # 我們用「os.path.isfile()」來判斷，如果（if not）這個路徑不是一個存在的「檔案（file）」...
     if not os.path.isfile(filepath):
         # ...我們就向「標準錯誤流（sys.stderr）」打印一條錯誤訊息。
@@ -84,7 +94,7 @@ def handle_read(filepath):
         # 然後用「sys.exit(2)」，帶著一個代表「資源不存在」的退出碼「2」，立刻「退出（exit）」腳本。
         sys.exit(2)
     
-    # TAG: DEFENSE
+    # DEFENSE:
     # 我們用「try...except...」結構，來捕獲讀取文件時可能發生的任何意外。
     try:
         # 「with open(...)」是一個安全的讀取檔案方式，它能確保檔案在結束後被自動關閉。
@@ -102,7 +112,7 @@ def handle_read(filepath):
 def handle_write(filepath):
     # 我們先獲取目標檔案所在的目錄路徑。
     parent_dir = os.path.dirname(filepath)
-    # TAG: DEFENSE
+    # DEFENSE:
     # 如果父目錄存在，但它不是一個有效的目錄...
     if parent_dir and not os.path.isdir(parent_dir):
         print(f"【路徑專家錯誤】：要寫入的目標檔案所在的資料夾不存在！\n  -> {parent_dir}", file=sys.stderr)
