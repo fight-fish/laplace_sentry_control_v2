@@ -77,6 +77,10 @@ def _call_daemon_and_show_feedback(command_and_args: List[str]) -> bool:
             if output.strip() and output.strip() != "OK":
                 if command_and_args[0] != 'list_projects':
                     print("--- 後端返回信息 ---\n" + output)
+            # 【修正】顯示系統通知 (stderr)，例如熱重啟提示
+            if error_output.strip():
+                print("--- 系統通知 ---\n" + error_output.strip())
+                
             return True
         # 我們專門為退出碼 10 開闢一條新的處理路徑
         elif exit_code == 10:
@@ -373,18 +377,51 @@ def main():
             
             elif choice == '1':
                 while True:
-                    print("\n--- 新增專案 (輸入 'q' 可隨時返回) ---")
-                    name = input("  請輸入專案別名 > ").strip()
-                    if name.lower() == 'q': break
-                    path = input("  請輸入專案目錄絕對路徑 > ").strip()
-                    if path.lower() == 'q': break
-                    output_file = input("  請輸入目標 Markdown 文件絕對路徑 > ").strip()
-                    if output_file.lower() == 'q': break
-                    if name and path and output_file:
-                        if _call_daemon_and_show_feedback(['add_project', name, path, output_file]):
-                            break
+                    print("\n--- 新增模式選擇 ---")
+                    print("  [1] 建立全新專案 (Create New Project)")
+                    print("  [2] 為現有專案追加目標 (Add Target to Existing)")
+                    print("  [q] 返回主選單")
+                    
+                    sub_choice = input("請輸入選項 > ").strip().lower()
+                    
+                    if sub_choice == 'q':
+                        break
+                    
+                    # --- 分支 A：建立全新專案 (原本的邏輯) ---
+                    elif sub_choice == '1':
+                        print("\n--- 新增專案 ---")
+                        name = input("  請輸入專案別名 > ").strip()
+                        if name.lower() == 'q': continue # 小優化：允許在這裡放棄
+                        path = input("  請輸入專案目錄絕對路徑 > ").strip()
+                        output_file = input("  請輸入目標 Markdown 文件絕對路徑 > ").strip()
+                        
+                        if name and path and output_file:
+                            if _call_daemon_and_show_feedback(['add_project', name, path, output_file]):
+                                break # 成功後退出新增模式
+                        else:
+                            print("錯誤：所有欄位都必須填寫。")
+                    # --- 分支 B：追加寫入檔 (你的新需求) ---
+                    elif sub_choice == '2':
+                        # 1. 先選專案 (複用現有的表格選擇器)
+                        selected_project = _select_project("選擇要追加目標的專案")
+                        
+                        if selected_project:
+                            uuid = selected_project.get('uuid')
+                            name = selected_project.get('name')
+                            print(f"\n您正在為專案 '{name}' 新增寫入目標...")
+                            
+                            # 2. 輸入新路徑
+                            new_target = input("  請輸入新的目標 Markdown 絕對路徑 > ").strip()
+                            
+                            # 3. 呼叫後端 API
+                            if new_target:
+                                # 如果成功，就退出新增模式
+                                if _call_daemon_and_show_feedback(['add_target', str(uuid), new_target]):
+                                    break
+                            else:
+                                print("錯誤：路徑不能為空。")
                     else:
-                        print("錯誤：所有欄位都必須填寫，請重新輸入。")
+                        print("無效的輸入。")
             
             elif choice == '2':
                 selected_project = _select_project("修改專案")
@@ -397,7 +434,7 @@ def main():
                         if field:
                             new_value = input(f"  請輸入 '{field}' 的新值 > ").strip()
                             if new_value:
-                                _call_daemon_and_show_feedback(['edit_project', uuid, field, new_value])
+                                _call_daemon_and_show_feedback(['edit_project', str(uuid), str(field), new_value])
                             else:
                                 print("錯誤：新值不能為空。")
                     else:

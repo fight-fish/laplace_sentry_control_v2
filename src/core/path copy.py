@@ -54,10 +54,8 @@ def normalize_path(path_str):
     match_wsl = re.match(r"^/{1,2}wsl\.localhost/([^/]+)/(.*)", p, re.IGNORECASE)
     # 如果（if）匹配成功...
     if match_wsl:
-            # 【智能判斷】只有在非 Windows 環境 (Linux/WSL) 才需要砍掉主機名轉成本地路徑。
-            # 在 Windows 中，我們保留 //wsl.localhost，因為它是合法的網路路徑。
-            if os.name != 'nt':
-                p = "/" + match_wsl.group(2)
+        # ...我們就丟掉前面的主機名，只保留後面的真實路徑部分。
+        p = "/" + match_wsl.group(2)
 
 # HACK:
     # 這是為了處理 Windows 的磁碟機代號路徑。
@@ -70,16 +68,8 @@ def normalize_path(path_str):
             rest_of_path = match_drive.group(2)
             p = f"/mnt/{drive_letter}/{rest_of_path}"
 
-# 最後，我們用「re.sub()」將路徑中可能出現的多個連續斜線壓縮為單個斜線。
-    # 【修正】但在 Windows 下，我們必須保護開頭的 UNC 雙斜線 (//)，不能把它壓成單斜線。
-    if os.name == 'nt' and p.startswith("//"):
-        # 如果是 UNC 路徑，我們先把頭切掉，處理後面的斜線，再接回去
-        p_rest = re.sub(r"/{2,}", "/", p[2:])
-        p = "//" + p_rest
-    else:
-        # Linux 或普通路徑，直接壓縮
-        p = re.sub(r"/{2,}", "/", p)
-    
+    # 最後，我們用「re.sub()」將路徑中可能出現的多個連續斜線（如 `//`）壓縮為單個斜線。
+    p = re.sub(r"/{2,}", "/", p)
     return p
 
 # 我們用「def」來 定義（define）一個函式，名叫「validate_paths_exist」。

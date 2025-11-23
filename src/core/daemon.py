@@ -9,6 +9,8 @@ import time
 import signal
 from typing import Optional, Tuple, List, Dict, Any
 import subprocess
+import shutil
+
 
 # --- 【v4.0 依賴注入】 ---
 # 我們現在只導入我們需要的、真正屬於「專家」的工具。
@@ -38,6 +40,40 @@ TEMP_PROJECTS_DIR = os.path.join(TEMP_DIR, 'projects')# 各專案專屬暫存與
 os.makedirs(TEMP_LISTS_DIR, exist_ok=True)
 os.makedirs(SENTRY_DIR, exist_ok=True)
 os.makedirs(TEMP_PROJECTS_DIR, exist_ok=True)
+
+def _cleanup_project_temp_dir(project_uuid: str) -> None:
+    """
+    刪除單一專案的 temp/projects/<uuid>/ 目錄。
+    這是 1.1 第一步：只清專案自己的 temp 資料。
+    """
+    project_temp_path = os.path.join(TEMP_PROJECTS_DIR, project_uuid)
+
+    if os.path.isdir(project_temp_path):
+        try:
+            shutil.rmtree(project_temp_path)
+            print(f"[INFO] 已清除暫存目錄: {project_temp_path}")
+        except Exception as e:
+            print(f"[警告] 刪除專案暫存資料夾失敗: {e}", file=sys.stderr)
+
+def _cleanup_project_logs(project_config: Dict[str, Any]) -> None:
+    """
+    刪除單一專案在 logs/ 底下的 log 檔。
+
+    ⚠ 實際系統中，哨兵 log 不會產生輪替檔，因此只需刪除：
+        logs/<safe_project_name>.log
+    """
+    project_name = project_config.get("name", "Unnamed_Project")
+    safe_prefix = "".join(c if c.isalnum() else "_" for c in project_name)
+
+    log_dir = os.path.join(project_root, "logs")
+    log_file = os.path.join(log_dir, f"{safe_prefix}.log")
+
+    if os.path.exists(log_file):
+        try:
+            os.remove(log_file)
+            print(f"【守護進程】: 已刪除專案 log 檔案 -> {safe_prefix}.log")
+        except OSError as e:
+            print(f"【守護進程警告】：刪除 log 檔案 {safe_prefix}.log 時失敗: {e}", file=sys.stderr)
 
 
 def is_self_project_path(path: str) -> bool:
@@ -145,8 +181,7 @@ def write_projects_data(data: List[Dict[str, Any]], file_path: str):
         raise IOError(f"寫入專案文件時失敗: {e}")
 
 # 這是一個內部使用的輔助函式，用於從一個專案的數據中，提取出它所有目標文件的路徑。
-def _get_targets_from_project(project_data):
-    # (此函式邏輯簡單直觀，暫不添加註解，以保持極簡)
+def _get_targets_from_project(project_data: Dict[str, Any]) -> List[str]:    # (此函式邏輯簡單直觀，暫不添加註解，以保持極簡)
     targets = project_data.get('target_files')
     if isinstance(targets, list) and targets: return targets
     output = project_data.get('output_file')
@@ -453,7 +488,8 @@ def handle_list_projects(projects_file_path: Optional[str] = None):
                                     return 1 # 如果已經死了，返回一個非零退出碼
                             def kill(self):
                                 try:
-                                    os.kill(self.pid, signal.SIGKILL)
+                                    # HACK: SIGKILL 在 POSIX 系統中，其數值為 9。我們使用硬編碼解決 Pylance 的誤報。
+                                    os.kill(self.pid, 9)
                                 except ProcessLookupError:
                                     pass # 如果已經死了，就什麼都不做
 
@@ -670,6 +706,119 @@ def handle_edit_project(args: List[str], projects_file_path: Optional[str] = Non
     # 我們調用 I/O 網關，讓它去執行這個「編輯」事務。
     safe_read_modify_write(PROJECTS_FILE, edit_callback, serializer='json')
 
+    #【v-HOT-RELOAD】自動無感重啟 ---
+    # 如果該專案的哨兵正在運行，則重啟它以套用新設定（例如新的黑名單）
+    if uuid_to_edit in running_sentries:
+        print(f"【系統自動調整】：偵測到專案配置變更，正在重啟哨兵以套用新設定...")
+        # 給一點時間讓檔案系統落定
+        time.sleep(0.5)
+        # 注意：這裡必須傳遞 projects_file_path，確保測試環境隔離性
+        handle_stop_sentry([uuid_to_edit], projects_file_path=projects_file_path)
+        handle_start_sentry([uuid_to_edit], projects_file_path=projects_file_path)
+
+def handle_add_target(args: List[str], projects_file_path: Optional[str] = None):
+    """【API】為指定專案「追加」一個新的目標寫入檔"""
+    PROJECTS_FILE = get_projects_file_path(projects_file_path)
+    
+    # 防護 1：參數數量檢查
+    if len(args) != 2:
+        raise ValueError("【追加失敗】：需要 2 個參數 (uuid, new_target_path)。")
+    
+    uuid_to_edit, new_target = args
+    
+    # 防護 2：路徑正規化 (Log 035)
+    clean_target = normalize_path(new_target)
+
+    # 防護 3：絕對路徑檢查
+    if not os.path.isabs(clean_target):
+        raise ValueError("目標路徑必須是絕對路徑。")
+    
+    # 防護 4：禁止寫入系統自身目錄 (Log 051 - 監控迴圈防禦)
+    abs_new = os.path.abspath(clean_target)
+    if is_self_project_path(abs_new):
+        raise ValueError("禁止將目標設定為哨兵自身專案路徑（避免監控迴圈）。")
+
+    # 防護 5：父目錄存在性檢查 (Log 043 - Fail Early 原則)
+    # 【這是我剛剛漏掉的，現在補上了】
+    parent_dir = os.path.dirname(clean_target)
+    if parent_dir and not os.path.isdir(parent_dir):
+        raise IOError(f"【追加失敗】：目標文件所在的資料夾不存在 -> {parent_dir}")
+
+    def add_callback(projects_data):
+        project = next((p for p in projects_data if p.get('uuid') == uuid_to_edit), None)
+        if not project:
+            raise ValueError(f"找不到專案 {uuid_to_edit}")
+        
+        # 確保是 List[str] (Log 034 - 數據模型一致性)
+        raw_targets = _get_targets_from_project(project)
+        current_targets: List[str] = list(raw_targets)
+
+
+        # 防護 6：單專案內重複檢查
+        if any(normalize_path(t) == clean_target for t in current_targets):
+            raise ValueError("該目標路徑已存在於此專案中。")
+
+        # 防護 7：跨專案衝突檢查 (Log 036 - 資源獨佔)
+        other_projects = [p for p in projects_data if p.get('uuid') != uuid_to_edit]
+        for p in other_projects:
+            if any(normalize_path(t) == clean_target for t in _get_targets_from_project(p)):
+                raise ValueError(f"路徑 '{clean_target}' 已被專案 '{p.get('name')}' 佔用。")
+
+        # 執行追加
+        current_targets.append(clean_target)
+        project['output_file'] = current_targets
+        project['target_files'] = current_targets # 保持雙欄位同步
+        return projects_data
+
+    # 執行原子寫入
+    safe_read_modify_write(PROJECTS_FILE, add_callback, serializer='json')
+    
+    # 觸發熱重啟 (Log 064 - 更新黑名單)
+    if uuid_to_edit in running_sentries:
+        print(f"【系統自動調整】：偵測到目標變更，正在重啟哨兵以更新黑名單...")
+        time.sleep(0.5)
+        handle_stop_sentry([uuid_to_edit], projects_file_path=projects_file_path)
+        handle_start_sentry([uuid_to_edit], projects_file_path=projects_file_path)
+
+def handle_remove_target(args: List[str], projects_file_path: Optional[str] = None):
+    """【API】從指定專案「移除」一個目標寫入檔"""
+    PROJECTS_FILE = get_projects_file_path(projects_file_path)
+    
+    if len(args) != 2:
+        raise ValueError("【移除失敗】：需要 2 個參數 (uuid, target_path_to_remove)。")
+
+    uuid_to_edit, target_to_remove = args
+    clean_remove = normalize_path(target_to_remove)
+
+    def remove_callback(projects_data):
+        project = next((p for p in projects_data if p.get('uuid') == uuid_to_edit), None)
+        if not project:
+            raise ValueError(f"找不到專案 {uuid_to_edit}")
+
+        current_targets = _get_targets_from_project(project)
+        # 找找看有無符合的路徑
+        new_targets = [t for t in current_targets if normalize_path(t) != clean_remove]
+
+        if len(new_targets) == len(current_targets):
+            raise ValueError(f"在專案中找不到目標路徑: {clean_remove}")
+        
+        # 防護 8：防止清空 (專案必須至少有一個輸出)
+        if len(new_targets) < 1:
+            raise ValueError("專案至少必須保留一個輸出目標，無法清空。")
+
+        project['output_file'] = new_targets
+        project['target_files'] = new_targets
+        return projects_data
+
+    safe_read_modify_write(PROJECTS_FILE, remove_callback, serializer='json')
+
+    # 觸發熱重啟
+    if uuid_to_edit in running_sentries:
+        print(f"【系統自動調整】：偵測到目標變更，正在重啟哨兵...")
+        time.sleep(0.5)
+        handle_stop_sentry([uuid_to_edit], projects_file_path=projects_file_path)
+        handle_start_sentry([uuid_to_edit], projects_file_path=projects_file_path)
+
 def handle_delete_project(args: List[str], projects_file_path: Optional[str] = None):
     PROJECTS_FILE = get_projects_file_path(projects_file_path)
 
@@ -677,19 +826,45 @@ def handle_delete_project(args: List[str], projects_file_path: Optional[str] = N
         raise ValueError("【刪除失敗】：需要 1 個參數 (uuid)。")
     uuid_to_delete = args[0]
 
+    # 用來記錄「被刪掉的是哪一個專案」，方便後續清理 log。
+    deleted_project_config: Optional[Dict[str, Any]] = None
+
     # 我們定義一個「刪除」的回調函式。
     def delete_callback(projects_data):
-        initial_len = len(projects_data)
-        # 我們用一個「列表推導式」，來創建一個不包含要刪除專案的新列表。
-        new_projects = [p for p in projects_data if p.get('uuid') != uuid_to_delete]
-        # 如果新舊列表的長度一樣，說明沒有找到要刪除的專案。
-        if len(new_projects) == initial_len:
+        nonlocal deleted_project_config
+
+        # 先找到要刪除的專案配置
+        deleted_project_config = next(
+            (p for p in projects_data if p.get('uuid') == uuid_to_delete),
+            None
+        )
+        if deleted_project_config is None:
             raise ValueError(f"未找到具有該 UUID 的專案 '{uuid_to_delete}'。")
+
+        # 再創建一個不包含該專案的新列表
+        new_projects = [p for p in projects_data if p.get('uuid') != uuid_to_delete]
         return new_projects
 
-    # 我們調用 I/O 網關，讓它去執行這個「刪除」事務。
+    # --- 第一步：真正從 projects.json 移除專案 ---
     safe_read_modify_write(PROJECTS_FILE, delete_callback, serializer='json')
 
+    # 防守性：理論上不會發生，保留一下
+    if deleted_project_config is None:
+        return
+
+    # --- 第二步：嘗試停止該專案的哨兵 ---
+    try:
+        # 這裡直接重用已有的 handle_stop_sentry 邏輯
+        handle_stop_sentry([uuid_to_delete])
+    except Exception as e:
+        # 沒有哨兵在跑、或戶籍壞掉，都只列印警告，不阻止刪除專案
+        print(f"【刪除專案警告】：停止專案哨兵時出現問題：{e}", file=sys.stderr)
+
+    # --- 第三步：清空專案專屬 temp/projects/<uuid>/ ---
+    _cleanup_project_temp_dir(uuid_to_delete)
+
+    # --- 第四步：清理 logs/<safe_project_name>.log ---
+    _cleanup_project_logs(deleted_project_config)
 
 
 def handle_manual_update(args: List[str], projects_file_path: Optional[str] = None):
@@ -708,42 +883,56 @@ def handle_manual_update(args: List[str], projects_file_path: Optional[str] = No
 
     project_path = selected_project.get('path')
     targets = _get_targets_from_project(selected_project)
-    target_doc_path = targets[0] if targets else None
 
     # 我們從專案的數據中，獲取 ignore_patterns。
     ignore_list = selected_project.get("ignore_patterns")
     # 我們檢查它是否是一個列表，如果是，就用 set() 將它轉換為一個集合。
     ignore_patterns = set(ignore_list) if isinstance(ignore_list, list) else None
 
-    if not project_path or not target_doc_path:
+    if not project_path or not targets:
         raise ValueError(f"專案 '{selected_project.get('name')}' 缺少有效的路徑配置。")
 
-    # 我們調用「_run_single_update_workflow」來獲取更新後的目錄樹內容。
-    exit_code, formatted_tree_block = _run_single_update_workflow(project_path, target_doc_path, ignore_patterns=ignore_patterns)
-    
-    if exit_code != 0:
-        raise RuntimeError(f"底層工人執行失敗:\n{formatted_tree_block}")
+    # 🟡 一個專案可能有多個目標檔：對每一個目標檔都執行同樣的更新流程
+    for target_doc_path in targets:
+        if not isinstance(target_doc_path, str) or not target_doc_path.strip():
+            raise ValueError(f"專案 '{selected_project.get('name')}' 中存在無效的目標檔設定。")
 
-    # 我們定義一個「更新 MD 文件」的回調函式。
-    def update_md_callback(full_old_content):
-        # (這部分拼接邏輯與之前版本相同，暫不重複註解)
-        start_marker = "<!-- AUTO_TREE_START -->"
-        end_marker = "<!-- AUTO_TREE_END -->"
-        if start_marker in full_old_content and end_marker in full_old_content:
-            head = full_old_content.split(start_marker)[0]
-            tail = full_old_content.split(end_marker, 1)[1]
-            return f"{head}{start_marker}\n{formatted_tree_block.strip()}\n{end_marker}{tail}"
-        else:
-            return f"{full_old_content.rstrip()}\n\n{start_marker}\n{formatted_tree_block.strip()}\n{end_marker}".lstrip()
+        # 我們調用「_run_single_update_workflow」來獲取更新後的目錄樹內容。
+        exit_code, formatted_tree_block = _run_single_update_workflow(
+            project_path,
+            target_doc_path,
+            ignore_patterns=ignore_patterns
+        )
+        
+        if exit_code != 0:
+            raise RuntimeError(
+                f"底層工人執行失敗（目標檔: {target_doc_path}）:\n{formatted_tree_block}"
+            )
 
-    # 我們調用 I/O 網關，讓它去執行這個「更新 MD 文件」的事務。
-    # 注意，這裡的序列化器是「text」，因為我們處理的是純文本。
-    safe_read_modify_write(
-        target_doc_path,
-        update_md_callback,
-        serializer='text',
-        project_uuid=uuid_to_update,  # ★ 傳入這次更新的是哪個專案
-    )
+        # 我們定義一個「更新 MD 文件」的回調函式。
+        def update_md_callback(full_old_content):
+            # (這部分拼接邏輯與之前版本相同，暫不重複註解)
+            start_marker = "<!-- AUTO_TREE_START -->"
+            end_marker = "<!-- AUTO_TREE_END -->"
+            if start_marker in full_old_content and end_marker in full_old_content:
+                head = full_old_content.split(start_marker)[0]
+                tail = full_old_content.split(end_marker, 1)[1]
+                return f"{head}{start_marker}\n{formatted_tree_block.strip()}\n{end_marker}{tail}"
+            else:
+                return (
+                    f"{full_old_content.rstrip()}\n\n"
+                    f"{start_marker}\n{formatted_tree_block.strip()}\n{end_marker}"
+                ).lstrip()
+
+        # 我們調用 I/O 網關，讓它去執行這個「更新 MD 文件」的事務。
+        # 注意，這裡的序列化器是「text」，因為我們處理的是純文本。
+        safe_read_modify_write(
+            target_doc_path,
+            update_md_callback,
+            serializer='text',
+            project_uuid=uuid_to_update,  # ★ 傳入這次更新的是哪個專案
+        )
+
 
     # 處理「manual_direct」命令。
 def handle_manual_direct(args: List[str], ignore_patterns: Optional[set] = None, projects_file_path: Optional[str] = None):
@@ -827,7 +1016,7 @@ def handle_start_sentry(args: List[str], projects_file_path: Optional[str] = Non
     # 我們將這個字符串作為第三個參數添加到命令中。
     command.append(output_files_str)
 
-    try:
+    try:    
         # 我們以「追加模式(a)」打開日誌文件。
         log_file = open(log_file_path, 'a', encoding='utf-8')
 
@@ -835,10 +1024,14 @@ def handle_start_sentry(args: List[str], projects_file_path: Optional[str] = Non
         print(f"【守護進程】: 命令: {' '.join(command)}")
         print(f"【守護進程】: 日誌將被寫入: {log_file_path}")
 
-        # 【核心動作】我們使用 Popen 在背景啟動子進程。
-        # 我們將它的 stdout 和 stderr 都重定向到我們打開的日誌文件中。
-        process = subprocess.Popen(command, stdout=log_file, stderr=log_file, text=True)
+        # 【修正】強制設定環境變數，讓 Windows 下的 Python 子進程乖乖吐出 UTF-8
+        sentry_env = os.environ.copy()
+        sentry_env["PYTHONIOENCODING"] = "utf-8"
+        sentry_env["PYTHONUTF8"] = "1"
 
+        # 【核心動作】我們使用 Popen 在背景啟動子進程。
+        # 注意：這裡新增了 env=sentry_env 參數
+        process = subprocess.Popen(command, stdout=log_file, stderr=log_file, text=True, env=sentry_env)
                 # 【TECH-DEBT-STATELESS-SENTRY 核心改造】
         # 理由：實現持久化的「出生登記」。
         # 我們在 Popen 成功後，立刻獲取新進程的 PID。
@@ -864,6 +1057,11 @@ def handle_start_sentry(args: List[str], projects_file_path: Optional[str] = Non
         running_sentries[uuid_to_start] = process
 
         print(f"【守護進程】: 哨兵已成功啟動。進程 PID: {process.pid}")
+
+        # --- 【v-HOT-RELOAD】啟動即更新 ---
+        # 理由：確保哨兵上工時，文件狀態是最新的，且利用此操作的寫入事件來驗證黑名單是否生效。
+        print(f"【守護進程】: 正在執行啟動後的初始更新...", file=sys.stderr)
+        handle_manual_update([uuid_to_start], projects_file_path=projects_file_path)
 
     except Exception as e:
         # 任何在啟動過程中發生的錯誤，都會被這個安全網捕獲。
@@ -899,7 +1097,7 @@ def handle_stop_sentry(args: List[str], projects_file_path: Optional[str] = None
                     print(f"【守護進程警告】：掃描戶籍文件 {pid_file_path} 時出錯，已跳過。", file=sys.stderr)
                     continue
     except OSError as e:
-         raise IOError(f"【停止失敗】：掃描戶籍登記處 ({SENTRY_DIR}) 時發生 I/O 錯誤: {e}")
+        raise IOError(f"【停止失敗】：掃描戶籍登記處 ({SENTRY_DIR}) 時發生 I/O 錯誤: {e}")
 
     # 步驟 2: 如果沒有找到戶籍文件，說明該哨兵可能從未啟動或已被停止。
     if pid_to_kill is None:
@@ -973,6 +1171,12 @@ def main_dispatcher(argv: List[str], **kwargs):
             print("OK")
         elif command == 'edit_project':
             handle_edit_project(args, projects_file_path=projects_file_path)
+            print("OK")
+        elif command == 'add_target':
+            handle_add_target(args, projects_file_path=projects_file_path)
+            print("OK")
+        elif command == 'remove_target':
+            handle_remove_target(args, projects_file_path=projects_file_path)
             print("OK")
         elif command == 'delete_project':
             handle_delete_project(args, projects_file_path=projects_file_path)
