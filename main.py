@@ -146,6 +146,7 @@ def _select_project(operation_name: str) -> Optional[Dict[str, Any]]:
         "running": "[✅ 運行中]",
         "stopped": "[⛔️ 已停止]",
         "invalid_path": "[❌ 路徑失效]",
+        "muting": "[🤫 靜默中]",
     }
 
     # 【手術 1 核心】我們在計算寬度時，也要考慮狀態圖標的寬度。

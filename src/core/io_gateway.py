@@ -9,6 +9,7 @@ import shutil      # 【v3.0 新增】導入一個更高級的「文件操作工
 import sys
 import time
 
+
 # 【v3.0 新增】我們用「class」關鍵字，來定義一個我們自己的、專門用於「通知」的警告類型。
 # 它繼承自 Python 內建的「Exception」，這意味著它可以像其他異常一樣被「try...except」捕獲。
 class DataRestoredFromBackupWarning(Exception):
@@ -21,21 +22,50 @@ def safe_read_modify_write(
     file_path: str,
     update_callback: Callable[[Any], Any],
     serializer: str = 'json',
-    max_backups: int = 3
+    max_backups: int = 3,
+    project_uuid: str | None = None
 ) -> Tuple[Any, bool]:
     
-    # 我們在函式一開始，就定義好我們統一的「臨時中轉區」路徑。
+    # --- 1. 決定 temp 三大族譜中的實際落點 ---
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-    temp_dir = os.path.join(project_root, 'temp')
-    # 我們確保這個臨時資料夾存在。
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    # 我們從原始文件路徑中，提取出不帶路徑的文件名，例如 "projects.json"。
-    base_filename = os.path.basename(file_path)
-    
-    # 我們用這個文件名，來構造位於「臨時中轉區」的鎖文件路徑。
-    lock_path = os.path.join(temp_dir, base_filename + ".lock")
 
+    # temp 根目錄（之後還會放 sentry、projects 等）
+    temp_root = os.path.join(project_root, 'temp')
+    os.makedirs(temp_root, exist_ok=True)
+
+    # lists/：給全局名單 / 設定用（例如 projects.json）
+    lists_dir = os.path.join(temp_root, 'lists')
+    os.makedirs(lists_dir, exist_ok=True)
+
+    # 從原始路徑取出檔名，例如 "projects.json"
+    base_filename = os.path.basename(file_path)
+
+    # 目前精準處理：
+    # - projects.json → 進 lists 族譜
+    # - 若明確給了 project_uuid → 進 projects/<uuid>/ 族譜
+    # - 否則，如果檔名以 <uuid>_ 開頭 → 進 projects/<uuid>/ 族譜（相容舊備份）
+    # - 其他（未分類）暫時落在 temp 根目錄
+    if base_filename == "projects.json":
+        temp_dir = lists_dir
+
+    elif project_uuid:
+        # 來自 daemon/handle_manual_update 額外提供的專案 UUID
+        project_temp_dir = os.path.join(temp_root, "projects", str(project_uuid))
+        os.makedirs(project_temp_dir, exist_ok=True)
+        temp_dir = project_temp_dir
+
+    elif "_" in base_filename and base_filename.split("_")[0].isalnum():
+        # 舊版：從檔名推 uuid，例如 "<uuid>_xxx.bak"
+        project_id = base_filename.split("_")[0]
+        project_temp_dir = os.path.join(temp_root, "projects", project_id)
+        os.makedirs(project_temp_dir, exist_ok=True)
+        temp_dir = project_temp_dir
+
+    else:
+        temp_dir = temp_root
+
+    # 在選好的 temp_dir 裡面放鎖檔
+    lock_path = os.path.join(temp_dir, base_filename + ".lock")
 
     restored_from_backup = False
     temp_path = None
@@ -103,13 +133,13 @@ def safe_read_modify_write(
             if os.path.exists(file_path):
                 # 我們獲取當前時間，並格式化成一個適合做文件名的字串。
                 timestamp = time.strftime("%Y%m%d-%H%M%S")
-                # 我們構造出帶有時間戳的、位於 temp/ 目錄下的新備份文件名。
+                # 我們構造出帶有時間戳的、位於 temp/lists/ 目錄下的新備份文件名。
                 new_backup_path = os.path.join(temp_dir, f"{base_filename}.{timestamp}.bak")
                 # 我們不再是「重命名」，而是安全地「複製」原始文件到備份區。
                 shutil.copyfile(file_path, new_backup_path)
 
                 # --- 【新增】自動清理舊備份 ---
-                # 我們再次列出所有相關的備份文件。
+                # 我們再次列出所有相關的備份文件（只看 temp/lists/ 裡的）。
                 all_backups = [f for f in os.listdir(temp_dir) if f.startswith(base_filename) and f.endswith('.bak')]
                 # 按文件名（時間戳）升序排序，這樣最舊的就在最前面。
                 all_backups.sort()

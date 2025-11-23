@@ -40,53 +40,77 @@ SYSTEM_DEFAULT_IGNORE: Set[str] = {
 
 def _visual_line_to_rel_path(visual_line: str, root_name: str) -> Optional[str]:
     """
-    將一行樹狀圖的「視覺文字」還原成相對路徑 key。
-    例如：
-        '├── src/'                -> 'src/'
-        '│   └── core/'           -> 'src/core/'
-        '│   │   └── engine.py'   -> 'src/core/engine.py'
+    將「樹狀圖中的一行視覺文字」，轉回邏輯上的相對路徑 key。
+
+    例如（假設根目錄名為 'laplace_sentry_control_v2/'）：
+        '├── src/'               -> 'src/'
+        '│   └── core/'          -> 'src/core/'
+        '│   │   └── engine.py'  -> 'src/core/engine.py'
+
+    參數：
+        visual_line : 一整行樹狀圖文字，包含前導的 '│   '、'├── ' 等符號。
+        root_name   : 根節點在樹狀圖中的顯示名稱，例如 'laplace_sentry_control_v2/'。
+
+    回傳：
+        - 對應的相對路徑字串，例如 'src/core/engine.py' 或 'src/core/'。
+        - 根節點回傳空字串 ""。
+        - 如果該行不是樹狀節點（例如空行、說明行），則回傳 None。
     """
+
+    # 我們先用 rstrip() 去掉右邊多餘的空白，確保後續比對穩定。
     line = visual_line.rstrip()
 
-    # 根節點特判：整行等於 root 名稱（例如 'laplace_sentry_control_v2/'）
+    # 根節點特判：
+    # 如果整行等於根節點名稱（例如 'laplace_sentry_control_v2/'），
+    # 我們約定它的相對路徑 key 為空字串 ""。
     if line == root_name:
         return ""
 
-    # 只處理包含樹枝符號的行
+    # 只處理真正的「節點行」：必須包含 '└── ' 或 '├── '
     branch_token = None
     if "└── " in line:
         branch_token = "└── "
     elif "├── " in line:
         branch_token = "├── "
     else:
+        # 如果連這兩種符號都沒有，代表這行只是裝飾或空行，直接忽略。
         return None
 
+    # 我們用 branch_token 在這一行中的位置，來反推出「深度」。
     branch_idx = line.index(branch_token)
-    # prefix 由若干個 '│   ' 或 '    ' 組成，每 4 個字元代表一層深度
+    # 每一層縮排都由四個字元組成（'│   ' 或 '    '），
+    # 所以用「整除 4」就可以得到目前這個節點所在的層級深度。
     depth = branch_idx // 4
 
-    # 取得節點名稱（含可能的結尾 '/'）
+    # 取得「節點名稱」本身（可能以 '/' 結尾，代表資料夾）。
     name = line[branch_idx + len(branch_token):]
 
-    # 用一個 stack 記錄各層資料夾名稱（都以 '/' 結尾）
+    # HACK:
+    # 我們用一個掛在函式本體上的「層級堆疊（stack）」來記住目前資料夾路徑。
+    # 每一個元素都是一層資料夾名稱（以 '/' 結尾），例如 ['src/', 'core/']。
+    # 這種設計讓我們可以在「單次逐行掃描」時，逐步重建整個路徑。
     if not hasattr(_visual_line_to_rel_path, "_dir_stack"):
         _visual_line_to_rel_path._dir_stack = []  # type: ignore[attr-defined]
     dir_stack = _visual_line_to_rel_path._dir_stack  # type: ignore[attr-defined]
 
-    # 如果當前深度小於等於 stack 長度，就先截斷
+    # 如果當前節點的「深度」比 stack 短，代表我們往上爬了：
+    #   例如從 'src/core/' 跳回 'src/' 同層的其他節點。
+    # 這時就把多出來的層級截斷掉。
     if depth <= len(dir_stack):
         dir_stack[:] = dir_stack[:depth]
 
-    # 判斷是資料夾還是檔案
+    # 接下來判斷這個節點是「資料夾」還是「檔案」：
     if name.endswith("/"):
-        # 資料夾：直接加入 stack
+        # 資料夾節點：直接加入層級堆疊，
+        # 並把所有層級串起來，形成對應的相對路徑 key。
         dir_stack.append(name)
         rel_path = "".join(dir_stack)
     else:
-        # 檔案：掛在當前資料夾 stack 之下
+        # 檔案節點：掛在目前的資料夾堆疊之下。
         rel_path = "".join(dir_stack) + name
 
     return rel_path
+
 
 from collections import defaultdict
 

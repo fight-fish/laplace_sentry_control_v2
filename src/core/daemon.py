@@ -29,6 +29,17 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..
 # 我們定義 temp 目錄的默認路徑。
 TEMP_DIR = os.path.join(project_root, 'temp')
 
+# 三大族譜：lists / sentry / projects
+TEMP_LISTS_DIR = os.path.join(TEMP_DIR, 'lists')      # 全局名單 / 設定備份
+SENTRY_DIR      = os.path.join(TEMP_DIR, 'sentry')    # 哨兵戶籍 / 狀態
+TEMP_PROJECTS_DIR = os.path.join(TEMP_DIR, 'projects')# 各專案專屬暫存與備份
+
+# 確保三大族譜目錄存在
+os.makedirs(TEMP_LISTS_DIR, exist_ok=True)
+os.makedirs(SENTRY_DIR, exist_ok=True)
+os.makedirs(TEMP_PROJECTS_DIR, exist_ok=True)
+
+
 def is_self_project_path(path: str) -> bool:
     """
     判斷給定路徑是否位於 laplace_sentry_control_v2 專案內部。
@@ -223,9 +234,9 @@ def _derive_ignore_patterns_from_muted_paths(muted_paths: List[str]) -> List[str
 
     策略：
     - 如果最後一段看起來像「檔案」（包含 .）→ 取父目錄名稱
-      例：/foo/bar/logs/error.log  → logs
+    例：/foo/bar/logs/error.log  → logs
     - 否則視為「目錄」→ 取最後一段本身
-      例：/foo/bar/tmp              → tmp
+    例：/foo/bar/tmp              → tmp
     """
     patterns: set[str] = set()
 
@@ -405,9 +416,9 @@ def handle_list_projects(projects_file_path: Optional[str] = None):
         # 【TECH-DEBT-STATELESS-SENTRY 核心改造】
     # 理由：在執行任何操作之前，先進行一次「全國人口普查」，清理掉所有名存實亡的「殭屍戶籍」。
     try:
-        for filename in os.listdir(TEMP_DIR):
+        for filename in os.listdir(SENTRY_DIR):
             if filename.endswith(".sentry"):
-                pid_file_path = os.path.join(TEMP_DIR, filename)
+                pid_file_path = os.path.join(SENTRY_DIR, filename)
                 try:
                     pid = int(filename.split('.')[0])
                     # 檢查 PID 是否真實存在於操作系統中
@@ -448,7 +459,6 @@ def handle_list_projects(projects_file_path: Optional[str] = None):
 
                         running_sentries[sentry_uuid] = PidProxy(pid)
 
-
                 except (ValueError, ProcessLookupError):
                     # 如果 PID 無效，或進程已死亡，這就是一個「殭屍戶籍」。
                     print(f"【殭屍普查】：發現無效或已死亡的戶籍文件 {filename}，正在自動清理...", file=sys.stderr)
@@ -460,7 +470,7 @@ def handle_list_projects(projects_file_path: Optional[str] = None):
                     # 忽略其他權限問題等，保持普查的健壯性。
                     continue
     except OSError as e:
-        print(f"【殭屍普查警告】：掃描戶籍登記處 ({TEMP_DIR}) 時發生 I/O 錯誤: {e}", file=sys.stderr)
+        print(f"【殭屍普查警告】：掃描戶籍登記處 ({SENTRY_DIR}) 時發生 I/O 錯誤: {e}", file=sys.stderr)
 
     PROJECTS_FILE = get_projects_file_path(projects_file_path)
 
@@ -728,7 +738,12 @@ def handle_manual_update(args: List[str], projects_file_path: Optional[str] = No
 
     # 我們調用 I/O 網關，讓它去執行這個「更新 MD 文件」的事務。
     # 注意，這裡的序列化器是「text」，因為我們處理的是純文本。
-    safe_read_modify_write(target_doc_path, update_md_callback, serializer='text')
+    safe_read_modify_write(
+        target_doc_path,
+        update_md_callback,
+        serializer='text',
+        project_uuid=uuid_to_update,  # ★ 傳入這次更新的是哪個專案
+    )
 
     # 處理「manual_direct」命令。
 def handle_manual_direct(args: List[str], ignore_patterns: Optional[set] = None, projects_file_path: Optional[str] = None):
@@ -831,7 +846,7 @@ def handle_start_sentry(args: List[str], projects_file_path: Optional[str] = Non
         # 我們構造出這個哨兵的「戶籍文件」路徑。
         # 注意：我們需要一個統一的地方來管理 temp 目錄的路徑。
         # 我們先在文件頂部定義一個全局的 TEMP_DIR。
-        pid_file_path = os.path.join(TEMP_DIR, f"{pid}.sentry")
+        pid_file_path = os.path.join(SENTRY_DIR, f"{pid}.sentry")
         
         # 我們將專案的 UUID，寫入這個戶籍文件中。
         try:
@@ -867,9 +882,9 @@ def handle_stop_sentry(args: List[str], projects_file_path: Optional[str] = None
 
     # 步驟 1: 掃描戶籍登記處 (temp 目錄)，查找目標的戶籍文件。
     try:
-        for filename in os.listdir(TEMP_DIR):
+        for filename in os.listdir(SENTRY_DIR):
             if filename.endswith(".sentry"):
-                pid_file_path = os.path.join(TEMP_DIR, filename)
+                pid_file_path = os.path.join(SENTRY_DIR, filename)
                 try:
                     with open(pid_file_path, 'r', encoding='utf-8') as f:
                         file_content_uuid = f.read().strip()
@@ -884,7 +899,7 @@ def handle_stop_sentry(args: List[str], projects_file_path: Optional[str] = None
                     print(f"【守護進程警告】：掃描戶籍文件 {pid_file_path} 時出錯，已跳過。", file=sys.stderr)
                     continue
     except OSError as e:
-        raise IOError(f"【停止失敗】：掃描戶籍登記處 ({TEMP_DIR}) 時發生 I/O 錯誤: {e}")
+         raise IOError(f"【停止失敗】：掃描戶籍登記處 ({SENTRY_DIR}) 時發生 I/O 錯誤: {e}")
 
     # 步驟 2: 如果沒有找到戶籍文件，說明該哨兵可能從未啟動或已被停止。
     if pid_to_kill is None:
