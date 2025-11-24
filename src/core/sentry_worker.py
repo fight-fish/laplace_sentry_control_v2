@@ -55,6 +55,20 @@ import json       # 用於將 muted_paths 狀態序列化到 .sentry_status（�
 from typing import Set, Dict, List, Tuple, Optional  # 用於型別註解，提升可讀性與穩定性。
 from datetime import datetime, timedelta            # 用於事件時間戳與規則計算（R1/R4）。
 
+# --------------------------------------------------------------------------
+# 【修正 A】最終編碼修正：強制 Windows 上的標準輸出為 UTF-8
+# --------------------------------------------------------------------------
+if sys.platform == 'win32':
+    import io
+    # 這會將標準輸出 (sys.stdout) 重新配置為使用 UTF-8 編碼，解決亂碼問題
+    # 我們只在 Windows 上執行此操作，以保持程式碼在 POSIX 上的整潔
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    except Exception:
+        # 如果重配置失敗，我們就靜默忽略，讓它保持原樣
+        pass
+
 # --- 第三方庫：Cross-platform 文件系統監控 ---
 from watchdog.events import FileSystemEventHandler   # 提供事件回呼（on_modified, on_created...）
 from watchdog.observers.polling import PollingObserver  

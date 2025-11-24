@@ -507,8 +507,9 @@ def main():
                 input("\n--- 按 Enter 鍵返回主菜單 ---")
 
         except KeyboardInterrupt:
-            print("\n\n操作被用戶中斷。正在退出...")
-            break
+            # 修正：強制返回主菜單，忽略意外的信號干擾
+            print("\n\n【警告】偵測到信號干擾，程式將返回主菜單。")
+            continue
         except Exception as e:
             # 【承諾 3: 終極安全氣囊】
             print("\n" + "="*50)
