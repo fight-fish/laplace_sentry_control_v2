@@ -1,3 +1,4 @@
+
 # **releases.md（v2.0）**
 
 **Laplace Sentry Control System — Release Notes**
@@ -8,6 +9,8 @@
 
 | 版本         | 主軸        | 關鍵變化                           |
 | ---------- | --------- | ------------------------------ |
+| **v6.6.0** | UI 整合     | 右鍵選單、刪除功能、重名自動重試 |
+| **v6.5.0** | 系統修復    | WSL 背景執行與 CLI 通訊修復    |
 | **v6.4.0** | Engine 重構 | prefix 修正、註釋系統、engine 邏輯清理     |
 | **v6.3.0** | 靜默審計      | muting → ignore patterns 流程穩定化 |
 | **v6.2.0** | 狀態檔       | worker → daemon 單向訊號建立         |
@@ -15,6 +18,56 @@
 | **v6.0.0** | 永生哨兵      | 多專案監控穩定版（multi-sentry）         |
 | **v5.x**   | 遺留系統      | 舊版生命週期與不完整 worker 模組           |
 | **v4.x**   | 初代雛形      | 實驗性 watcher＋尚未封裝 I/O           |
+
+---
+
+# ## **v6.6.0 — UI Full Control Integration**
+
+**（2025-11-29）**
+
+### **摘要**
+
+本版本補齊了 Windows UI 對後端控制的最後一塊拼圖：**刪除與手動更新**。
+使用者現在可以透過圖形介面完全掌控專案的生命週期（生、死、養），無需再依賴 CLI。
+
+### **亮點**
+
+* **右鍵選單**：支援在專案列表上按右鍵，執行「刪除專案」與「手動更新」。
+* **安全刪除**：刪除前會彈出確認視窗，防止誤操作。
+* **智慧新增**：新增專案時若遇重名，自動彈出更名對話框並重試，無需重新填寫。
+* **Stub 移除**：全面移除介面上的 "(Stub)" 字樣，正式進入真實運作階段。
+
+### **技術更新**
+
+* **UI**：實作 `CustomContextMenu` 與 `QInputDialog` 互動邏輯。
+* **Adapter**：新增 `delete_project` 與 `trigger_manual_update` 介面。
+* **Integration**：驗證了 UI → Adapter → Daemon 的完整指令鏈路。
+
+---
+
+# ## **v6.5.0 — Sentry Background Fix (The Immortal Update)**
+
+**（2025-11-29）**
+
+### **摘要**
+
+本版本徹底解決了哨兵在 WSL 背景執行（由 Windows UI 啟動）時的「瞬間崩潰」與「通訊失敗」問題。
+標誌著 **WSL 後端與 Windows 前端協作鏈路** 的完全打通。
+
+### **亮點**
+
+* **不死哨兵**：解決了父進程退出導致子進程被連坐處決的問題。
+* **雙模入口**：`main.py` 現在能自動識別是「人為操作」還是「機器呼叫」。
+* **除錯可視化**：哨兵現在能大聲說出錯誤原因（stderr），不再沈默。
+
+### **技術更新**
+
+* **Daemon**：引入 `start_new_session=True` (setsid) 讓哨兵成為獨立守護進程。
+* **Daemon**：引入全域 `log_file` 參照，防止 Python GC 過早關閉 I/O 通道。
+* **Client**：`main.py` 新增 `sys.argv` 偵測，實現無頭模式（Headless Mode）支援。
+* **Worker**：重構觸發邏輯，強制捕獲並解碼 `stderr`。
+
+---
 
 > v6 系列被視為：
 > **Sentry 的正式成熟架構期（Stabilization Era）**
