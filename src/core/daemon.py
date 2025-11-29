@@ -1233,6 +1233,67 @@ def main_dispatcher(argv: List[str], **kwargs):
             uuid = args[0]
             result = handle_add_ignore_patterns([uuid])
             print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == 'list_ignore_candidates':
+            if not args:
+                print("錯誤：缺少 UUID 參數。", file=sys.stderr)
+                return 1
+            uuid = args[0]
+            # 呼叫內部既有的邏輯函式
+            candidates = list_ignore_candidates_for_project(uuid, projects_file_path=projects_file_path)
+            print(json.dumps(candidates, ensure_ascii=False, indent=2))
+
+            # 【新增】專門用來回傳「目前已設定」的忽略規則 (解決 UI 顯示全空的問題)
+        elif command == 'list_ignore_patterns':
+            if not args:
+                print("錯誤：缺少 UUID 參數。", file=sys.stderr)
+                return 1
+            uuid = args[0]
+            # 呼叫內部既有的邏輯函式 (這函式原本就有，只是沒開放給 CLI)
+            patterns = list_ignore_patterns_for_project(uuid, projects_file_path=projects_file_path)
+            print(json.dumps(patterns, ensure_ascii=False, indent=2))
+
+        elif command == 'update_ignore_patterns':
+            if not args:
+                print("錯誤：缺少 UUID 參數。", file=sys.stderr)
+                return 1
+            uuid = args[0]
+            new_patterns = args[1:]
+            
+            # 1. 先寫入設定 (這步是成功的)
+            update_ignore_patterns_for_project(uuid, new_patterns, projects_file_path=projects_file_path)
+            print("OK")
+
+            # --- 【v-HOT-RELOAD 修復】解決 Stateless 架構下的失憶問題 ---
+            # 我們不能依賴 running_sentries (因為每次呼叫 daemon 都是新的進程，記憶體是空的)
+            # 我們必須去檢查硬碟上的「戶籍資料 (SENTRY_DIR)」來判斷哨兵是否活著。
+            
+            is_sentry_active = False
+            try:
+                if os.path.exists(SENTRY_DIR):
+                    for fname in os.listdir(SENTRY_DIR):
+                        if fname.endswith('.sentry'):
+                            # 讀取戶籍檔內容，看看是不是這個 UUID
+                            try:
+                                with open(os.path.join(SENTRY_DIR, fname), 'r', encoding='utf-8') as f:
+                                    if f.read().strip() == uuid:
+                                        is_sentry_active = True
+                                        break
+                            except:
+                                continue
+            except Exception as e:
+                print(f"【系統警告】檢查哨兵狀態時發生錯誤: {e}", file=sys.stderr)
+
+            # 如果發現它活著，就強制重啟
+            if is_sentry_active:
+                print(f"【系統自動調整】：偵測到忽略規則變更，且哨兵正在運行，正在執行熱重啟...", file=sys.stderr)
+                time.sleep(0.5)
+                try:
+                    handle_stop_sentry([uuid], projects_file_path=projects_file_path)
+                    handle_start_sentry([uuid], projects_file_path=projects_file_path)
+                except Exception as e:
+                    print(f"【熱重啟失敗】：{e}", file=sys.stderr)
+
         else:
             print(f"錯誤：未知命令 '{command}'。", file=sys.stderr)
             return 1
