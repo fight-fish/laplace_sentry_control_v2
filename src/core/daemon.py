@@ -609,6 +609,10 @@ def handle_add_project(args: List[str], projects_file_path: Optional[str] = None
     if parent_dir and not os.path.isdir(parent_dir):
         raise IOError(f"【新增失敗】：目標文件所在的資料夾不存在 -> {parent_dir}")
 
+# 【Task I 修正】嚴格檢查：目標檔案必須真實存在
+    if not os.path.isfile(clean_output_file):
+        raise IOError(f"【新增失敗】：目標文件不存在 -> {clean_output_file}\n(請先在檔案總管建立該檔案，再進行註冊)")
+
     if not validate_paths_exist([clean_path]):
         raise IOError(f"【新增失敗】：專案目錄路徑不存在 -> {clean_path}")
 
@@ -690,6 +694,10 @@ def handle_edit_project(args: List[str], projects_file_path: Optional[str] = Non
             clean_new_output_file = normalize_path(new_value)
             if not os.path.isabs(clean_new_output_file):
                 raise ValueError("新的目標文件路徑必須是絕對路徑。")
+            
+            # 【Task I 修正】嚴格檢查：目標檔案必須真實存在
+            if not os.path.isfile(clean_new_output_file):
+                raise ValueError(f"目標文件不存在 -> {clean_new_output_file}")
             
             abs_project_path = os.path.abspath(project_to_edit['path'])
             abs_new_out = os.path.abspath(clean_new_output_file)
@@ -952,6 +960,10 @@ def handle_manual_direct(args: List[str], ignore_patterns: Optional[set] = None,
 
     if not os.path.isdir(project_path):
         raise IOError(f"專案目錄不存在或無效 -> {project_path}")
+    
+    # 【最終防線】目標文件必須存在，禁止自由模式自動創建檔案
+    if not os.path.isfile(target_doc_path):
+        raise IOError(f"目標文件不存在 -> {target_doc_path}")
 
     exit_code, formatted_tree_block = _run_single_update_workflow(project_path, target_doc_path, ignore_patterns=ignore_patterns)
     if exit_code != 0:
