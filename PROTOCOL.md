@@ -1,17 +1,3 @@
-了解，我現在直接 **重寫一份全新的《PROTOCOL.md｜v4.0》**
-目標是：
-
-* 結構更清晰
-* 更容易維護
-* 不破壞你既有的模組邏輯
-* 未來 UI 出現時不會產生矛盾
-* 模組邊界、責任分工、通訊流向「一句話就看懂」
-
-**下面就是「重寫後的完整 PROTOCOL v4.0」**
-你可以直接複製到你的 `PROTOCOL.md`。
-
----
-
 # **PROTOCOL.md（v4.0）**
 
 **Sentry Control System — Module Boundary & Communication Contract**

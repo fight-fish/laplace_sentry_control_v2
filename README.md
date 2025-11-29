@@ -120,6 +120,12 @@ laplace_sentry_control_v2/
 
 所有指令都透過 `python main.py` 進行：
 
+### ***進入虛擬環境*
+
+```bash
+source .venv/bin/activate
+```
+
 ### **列出所有專案**
 
 ```bash

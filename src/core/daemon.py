@@ -100,6 +100,9 @@ def is_self_project_path(path: str) -> bool:
 # 它的鍵(key)是專案的 uuid，值(value)將是 subprocess.Popen 返回的進程對象。
 running_sentries: Dict[str, Any] = {}
 
+# 【正規修復】用來保管日誌檔案物件，防止被垃圾回收關閉
+sentry_log_files: Dict[str, Any] = {}
+
 # --- 用下面的代碼，完整替換舊的 _get_projects_file_path ---
 def get_projects_file_path(provided_path: Optional[str] = None) -> str:
     """
@@ -494,10 +497,13 @@ def handle_list_projects(projects_file_path: Optional[str] = None):
                                     pass # 如果已經死了，就什麼都不做
 
                         running_sentries[sentry_uuid] = PidProxy(pid)
+                        # 【新增探針 1】確認普查成功
+                        print(f"【普查成功 DEBUG】發現存活哨兵: UUID={sentry_uuid}, PID={pid}", file=sys.stderr)
 
-                except (ValueError, ProcessLookupError):
+                except (ValueError, ProcessLookupError) as e:
                     # 如果 PID 無效，或進程已死亡，這就是一個「殭屍戶籍」。
-                    print(f"【殭屍普查】：發現無效或已死亡的戶籍文件 {filename}，正在自動清理...", file=sys.stderr)
+                    # print(f"【殭屍普查】：發現無效或已死亡的戶籍文件 {filename}，正在自動清理...", file=sys.stderr)
+                    print(f"【殭屍普查 DEBUG】：PID {pid} 被判定死亡 (Error: {e})，正在清理戶籍 {filename}...", file=sys.stderr)
                     try:
                         os.remove(pid_file_path)
                     except OSError as e:
@@ -540,6 +546,8 @@ def handle_list_projects(projects_file_path: Optional[str] = None):
         if is_alive and is_path_valid_for_running:
             if uuid in project_map:
                 project_map[uuid]['status'] = 'running'
+                # 【新增探針 2】確認狀態更新
+                print(f"【狀態更新 DEBUG】專案 {uuid} 已標記為 RUNNING", file=sys.stderr)
         else:
             # ... 殭屍自愈邏輯保持不變 ...
             print(f"【殭屍自愈】: 偵測到失效哨兵 (UUID: {uuid}, PID: {process.pid})。原因: "
@@ -989,8 +997,10 @@ def handle_start_sentry(args: List[str], projects_file_path: Optional[str] = Non
     # 我們確保 logs 目錄存在。
     os.makedirs(log_dir, exist_ok=True)
 
-    # 我們定義要執行的命令。
+# 我們定義要執行的命令。
     sentry_script_path = os.path.join(project_root, 'src', 'core', 'sentry_worker.py')
+    # 【DEBUG】暫時改為啟動探針，測試 subprocess 通道是否正常
+    # sentry_script_path = os.path.join(project_root, 'src', 'core', 'probe.py')
     # 【核心安全措施】我們不再依賴系統環境，而是明確指定使用當前運行的這個 Python 解釋器。
     python_executable = sys.executable
     project_path = project_config.get('path', '') # 獲取專案路徑
@@ -1005,7 +1015,7 @@ def handle_start_sentry(args: List[str], projects_file_path: Optional[str] = Non
     if not project_path or not os.path.isdir(project_path):
         raise ValueError(f"專案 '{project_config.get('name')}' 的路徑無效或不存在: '{project_path}'")
 
-    command = [python_executable, sentry_script_path, uuid_to_start, project_path]
+    command = [python_executable, "-u", sentry_script_path, uuid_to_start, project_path]
 
     # 【OUTPUT-FILE-BLACKLIST 機制】
     # 理由:防止哨兵捕獲系統自身寫入 output_file 時產生的事件,避免監控迴圈。
@@ -1029,10 +1039,11 @@ def handle_start_sentry(args: List[str], projects_file_path: Optional[str] = Non
         sentry_env["PYTHONIOENCODING"] = "utf-8"
         sentry_env["PYTHONUTF8"] = "1"
 
-        # 【核心動作】我們使用 Popen 在背景啟動子進程。
-        # 注意：這裡新增了 env=sentry_env 參數
-        process = subprocess.Popen(command, stdout=log_file, stderr=log_file, text=True, env=sentry_env)
-                # 【TECH-DEBT-STATELESS-SENTRY 核心改造】
+# 【核心動作】我們使用 Popen 在背景啟動子進程。
+        # 【關鍵修復】start_new_session=True 讓子進程脫離父進程的會話組 (setsid)
+        # 這樣當短暫的 daemon.py 執行完畢退出時，哨兵才不會被 WSL 連帶殺死。
+        process = subprocess.Popen(command, stdout=log_file, stderr=log_file, text=True, env=sentry_env, start_new_session=True)
+        # 【TECH-DEBT-STATELESS-SENTRY 核心改造】
         # 理由：實現持久化的「出生登記」。
         # 我們在 Popen 成功後，立刻獲取新進程的 PID。
         pid = process.pid
@@ -1053,6 +1064,12 @@ def handle_start_sentry(args: List[str], projects_file_path: Optional[str] = Non
             raise RuntimeError(f"創建哨兵戶籍文件 {pid_file_path} 失敗。")
 
 
+        # 【登記戶口】我們將這個新的進程對象，記錄到我們的「戶口名簿」中。
+        # 【關鍵修復】將 log_file 綁定到 process 物件上，防止函式結束後 log_file 被垃圾回收而關閉，
+        # 導致子進程失去 stdout/stderr 而崩潰。
+    # 【正規修復】將 log_file 存入全局字典，確保它不會被垃圾回收
+        sentry_log_files[uuid_to_start] = log_file
+        
         # 【登記戶口】我們將這個新的進程對象，記錄到我們的「戶口名簿」中。
         running_sentries[uuid_to_start] = process
 
@@ -1142,6 +1159,14 @@ def handle_stop_sentry(args: List[str], projects_file_path: Optional[str] = None
         # 從內存中也移除（如果存在的話）
         if uuid_to_stop in running_sentries:
             del running_sentries[uuid_to_stop]
+            
+        # 【正規修復】關閉並移除日誌檔案物件
+        if uuid_to_stop in sentry_log_files:
+            try:
+                sentry_log_files[uuid_to_stop].close()
+            except Exception:
+                pass
+            del sentry_log_files[uuid_to_stop]
 
 
 # --- 總調度中心 ---

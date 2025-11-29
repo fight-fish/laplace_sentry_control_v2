@@ -522,4 +522,17 @@ def main():
             input("\n--- 按 Enter 鍵返回主菜單 ---")
 
 if __name__ == "__main__":
-    main()
+    # 【G-2 核心修正】自動判斷模式
+    # 如果有傳入參數（代表是哨兵或腳本呼叫的），走「快速通道」
+    if len(sys.argv) > 1:
+        # 取出指令參數（去掉第一個 main.py 本身）
+        args = sys.argv[1:]
+        
+        # 使用封裝好的函式，享受自動重試和錯誤處理的好處
+        success = _call_daemon_and_show_feedback(args)
+        
+        # 告訴呼叫者結果：成功回傳 0，失敗回傳 1
+        sys.exit(0 if success else 1)
+    else:
+        # 沒有參數（代表是人點開的），才進入「互動餐廳」
+        main()

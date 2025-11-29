@@ -1,565 +1,382 @@
-# ==============================================================================
-# 模組職責：sentry_worker.py
-#
-# 這個模組負責「獨立哨兵進程（Sentry Worker）」的所有行為，
-# 是系統中唯一直接監控檔案系統事件的核心單元。
-#
-# 【WHY — 為什麼需要這個模組？】
-# - 後端守護進程（daemon.py）無法直接進行檔案監控，因此需要一個獨立、可重啟、
-#   可隔離、具備自癒能力的監控子進程。
-# - 哨兵需要能「自我存活」，不會因使用者 Ctrl+C 或主程式崩潰而死亡。
-# - 監控需要提供可信訊號來源，以支援「智能靜默」、「審計固化」、「事件回饋」。
-#
-# 【WHAT — 這個模組實現了什麼？】
-# 1. 採用 PollingObserver 的「可靠輪詢」監控模式（避免 inotify 的侷限）
-# 2. 事件五階段處理流程：
-#       (1) R5 結構性防火牆 → 阻擋禁區路徑
-#       (2) OUTPUT-FILE-BLACKLIST → 阻擋自觸發事件（避免監控迴圈）
-#       (3) SmartThrottler → R1/R3/R4 三大智能靜默規則
-#       (4) 靜默列表（muted_paths）狀態郵箱寫入
-#       (5) 對 daemon.py 發送回報，觸發後端更新
-# 3. 完整的診斷探針（v1.0 & v2.0），提供可觀察性（Observability）
-# 4. SIGINT 忽略機制（哨兵求生本能）：避免被 Ctrl+C 殺死
-#
-# 【HOW — 這個模組是如何做到的？】
-# - 使用 watchdog + PollingObserver 進行跨平台穩定監控
-# - 以 JSON 寫入 /tmp/<uuid>.sentry_status 回報 muted_paths
-# - 透過 SmartThrottler 分析事件行為（頻率、創建量、體積變化）
-# - 以全局禁區 SENTRY_INTERNAL_IGNORE 過濾自身路徑與系統路徑
-# - 以 daemon.handle_manual_update() 串接後端更新流程
-#
-# TAG: DEFENSE
-# - 忽略 SIGINT，以防哨兵因前端 Ctrl+C 意外死亡
-# - 使用 OUTPUT-FILE-BLACKLIST 避免監控自身寫入行為
-#
-# TAG: HACK
-# - 為了在獨立子進程中導入專案路徑，採用了 sys.path.insert 的最小全域修補
-#
-# VERSION: v9.1 — 重生版（Reborn Edition）
-# ==============================================================================
-
-
-# ==============================================================================
-# 依賴模組導入區（Imports）
-#
-# 我們將所需的所有工具按「用途」分組導入，讓讀者能快速理解每個模組
-# 在哨兵監控（Sentry Worker）中扮演的角色。
-# ==============================================================================
-
-# --- Python 標準庫：系統與時間控制 ---
-import sys        # 用於調整模組搜尋路徑、處理 stdin/stdout，以及捕捉啟動參數。
-import time       # 用於事件節流（throttling）與睡眠（sleep）操作。
-import os         # 用於檔案路徑拼接、存在性判斷與事件路徑解析。
-import signal     # 用於忽略 Ctrl+C（SIGINT），確保哨兵子進程不被誤殺。
-import json       # 用於將 muted_paths 狀態序列化到 .sentry_status（郵箱系統）。
-from typing import Set, Dict, List, Tuple, Optional  # 用於型別註解，提升可讀性與穩定性。
-from datetime import datetime, timedelta            # 用於事件時間戳與規則計算（R1/R4）。
+# sentry_worker.py (v11.2 - 完全體：鐵肺 + 完整大腦 R1-R4 + 風格合規版)
+# 導入（import）sys 模組。
+import sys
+# 導入（import）time 模組。
+import time
+# 導入（import）os 模組。
+import os
+# 導入（import）signal 模組。
+import signal
+# 導入（import）json 模組。
+import json
+# 導入（import）subprocess 模組。
+import subprocess
+# 從 typing 導入（import）型別提示工具。
+from typing import Set, Dict, List, Tuple
+# 從 datetime 導入（import）時間處理工具。
+from datetime import datetime, timedelta
 
 # --------------------------------------------------------------------------
-# 【修正 A】最終編碼修正：強制 Windows 上的標準輸出為 UTF-8
+# 1. 基礎配置
 # --------------------------------------------------------------------------
+# 如果（if）作業系統是 Windows...
 if sys.platform == 'win32':
+    # 導入（import）io 模組。
     import io
-    # 這會將標準輸出 (sys.stdout) 重新配置為使用 UTF-8 編碼，解決亂碼問題
-    # 我們只在 Windows 上執行此操作，以保持程式碼在 POSIX 上的整潔
+    # 嘗試（try）設定標準輸出編碼。
     try:
+        # 重設（sys.stdout）為 UTF-8 編碼。
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+        # 重設（sys.stderr）為 UTF-8 編碼。
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    # 忽略（except）任何錯誤。
     except Exception:
-        # 如果重配置失敗，我們就靜默忽略，讓它保持原樣
         pass
 
-# --- 第三方庫：Cross-platform 文件系統監控 ---
-from watchdog.events import FileSystemEventHandler   # 提供事件回呼（on_modified, on_created...）
-from watchdog.observers.polling import PollingObserver  
-# 我們使用 PollingObserver，而不使用 inotify：
-#   - 避免 Linux inotify 跨平台限制
-#   - 避免大量事件漏報問題
-#   - 避免硬碟掛載點（mountpoints）導致事件丟失
-#   - 提供一致的輪詢式（polling）可靠行為
-
-
-# ==============================================================================
-# 核心配置區（Core Configuration）
-# ==============================================================================
-
-# DEFENSE:
-# 我們告訴作業系統：這個子進程（哨兵）必須忽略 SIGINT（Ctrl + C）。
-# 這能避免「前端主程式被使用者按 Ctrl+C 終止 → 哨兵也被誤殺」的災難性情況。
+# 設定（signal）忽略 SIGINT 信號。
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-# DEFENSE:
-# 這是一道「結構性防火牆（Structural Firewall）」。
-# 任何屬於系統自身的檔案／目錄，都不能作為監控事件來源，否則會觸發「自我監控」或「監控迴圈」。
-#
-# WHY:
-# - 避免監控到自己的狀態文件（.sentry_status）
-# - 避免監控 temp/ 與備份檔（.bak）
-# - 避免監控 logs/（否則哨兵寫入 log → 又被哨兵監控 → 無限迴圈）
-# - 避免監控 data/ 專案資料、.git、__pycache__ 等系統區
+# 定義（define）內部忽略名單。
 SENTRY_INTERNAL_IGNORE = (
-    '.sentry_status',
-    'temp',
-    'README.md',
-    'logs',
-    'data',
-    '.git',
-    '__pycache__',
-    '.venv',
-    '.vscode',
+    '.sentry_status', 'temp', 'README.md', 'logs', 'data',
+    '.git', '__pycache__', '.venv', '.vscode', 'crash_report.txt', 'fault.log'
 )
 
-# 專案自身根目錄（project_root）會在後續初始化階段動態建立，
-# 用於偵測「是否正在監控自己的來源目錄」。
+# 2. 計算專案根目錄
+# 獲取（dirname）當前檔案的絕對路徑。
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# 獲取（dirname）上一層目錄，定位到專案根目錄。
+project_root = os.path.dirname(os.path.dirname(current_dir))
 
+def trigger_update_cli(uuid):
+    main_script = os.path.join(project_root, "main.py")
+    cmd = [sys.executable, main_script, "manual_update", uuid]
+    try:
+        # 捕捉 stdout 和 stderr
+        result = subprocess.run(cmd, cwd=project_root, check=True, capture_output=True, text=True, encoding='utf-8')
+        print(f">>> 成功觸發更新指令", flush=True)
+    except subprocess.CalledProcessError as e:
+        # 【關鍵】印出 stderr，讓我們知道 main.py 為什麼死掉
+        print(f"!!! 更新指令執行失敗: {e}", flush=True)
+        print(f"!!! 錯誤詳情 (STDERR): {e.stderr}", flush=True)  
+        print(f"!!! 錯誤詳情 (STDOUT): {e.stdout}", flush=True)  
+    except Exception as e:
+        print(f"!!! 呼叫 CLI 時發生錯誤: {e}", flush=True)
 
-# ==============================================================================
-# SmartThrottler：智能抑制器（v1.0 - 重生版）
-# ==============================================================================
+# 3. 智能大腦 (SmartThrottler - 完整版回歸)
+# 我們定義（class）智能節流器類別。
 class SmartThrottler:
-    """
-    智能抑制器（Smart Throttler）
-
-    WHY（為什麼需要？）
-    --------------------
-    我們不希望哨兵被「大量、短時間、異常」的檔案事件淹沒，
-    因此 SmartThrottler 專門用來檢測：
-    - 單檔案短時間內的過熱修改（R1）
-    - 單資料夾的爆量創建（R3）
-    - 單檔案在短時間內「體積異常膨脹」（R4）
-
-    WHAT（它做什麼？）
-    -------------------
-    - 為每個路徑維護行為時間序列
-    - 根據三種規則決定是否需要「靜默（muting）」該路徑
-    - 將被靜默的路徑加入 muted_paths，供事件處理器使用
-
-    HOW（它怎麼做？）
-    -------------------
-    - 使用 datetime timestamp 建立事件時間窗
-    - 使用可調整的閾值（threshold）與觀察期（period）
-    - 為每條路徑建立獨立的歷史行為資料表
-    """
-
+    # 我們定義（def）初始化函式。
     def __init__(self,
                 burst_creation_threshold: int = 20,
                 burst_creation_period_seconds: float = 10.0,
                 size_growth_threshold_mb: int = 100,
                 size_growth_period_seconds: float = 60.0):
+        
+        # 設定（set）R1 單檔過熱閾值。
+        self.hot_threshold = 5
+        # 設定（set）R1 時間區間。
+        self.hot_period = timedelta(seconds=5.0)
+        # 初始化（init）熱點事件字典。
+        self.hot_events: Dict[str, List[datetime]] = {}
+        
+        # 設定（set）R3 爆量閾值。
+        self.burst_threshold = burst_creation_threshold
+        # 設定（set）R3 時間區間。
+        self.burst_period = timedelta(seconds=burst_creation_period_seconds)
+        # 初始化（init）目錄事件字典。
+        self.dir_events: Dict[str, List[datetime]] = {}
 
-        # ----------------------------------------------------------------------
-        # R1：單檔過熱規則（Hot File Rule）
-        # ----------------------------------------------------------------------
-        # 如果同一個檔案在 hot_period 內被修改超過 hot_threshold 次，
-        # 我們推定該檔案處於「過熱」狀態，應該臨時靜默。
-        self.hot_threshold = 5                    # 時間窗內允許的最大事件數
-        self.hot_period = timedelta(seconds=5.0)  # 時間窗（5 秒）
-        self.hot_events: Dict[str, List[datetime]] = {}   # {file_path: [timestamps...]}
+        # 設定（set）R4 體積閾值（Bytes）。
+        self.size_threshold_bytes = size_growth_threshold_mb * 1024 * 1024
+        # 設定（set）R4 時間區間。
+        self.size_period = timedelta(seconds=size_growth_period_seconds)
+        # 初始化（init）檔案大小歷史字典。
+        self.file_sizes: Dict[str, List[Tuple[datetime, int]]] = {}
 
-        # ----------------------------------------------------------------------
-        # R3：爆量創建規則（Burst Creation Rule）
-        # ----------------------------------------------------------------------
-        # 如果某個資料夾在短時間內累積太多「created」事件，
-        # 代表可能有工具產生大量檔案（如 node_modules、cache）。
-        self.burst_creation_threshold = burst_creation_threshold
-        self.burst_creation_period = timedelta(seconds=burst_creation_period_seconds)
-        self.creation_timestamps: Dict[str, List[datetime]] = {}  # {dir_path: [timestamps...]}
-
-        # ----------------------------------------------------------------------
-        # R4：體積異常成長規則（Abnormal Size Growth Rule）
-        # ----------------------------------------------------------------------
-        # 如果某檔案在 size_growth_period 內成長超過指定閾值（預設 100MB），
-        # 通常代表 log 流失控或壓縮前的暫存檔暴漲 → 必須靜默。
-        self.size_growth_threshold_bytes = size_growth_threshold_mb * 1024 * 1024
-        self.size_growth_period = timedelta(seconds=size_growth_period_seconds)
-        self.size_history: Dict[str, List[Tuple[datetime, int]]] = {}  # {file_path: [(ts, size), ...]}
-
-        # ----------------------------------------------------------------------
-        # 全域靜默黑名單（Muted Paths）
-        # ----------------------------------------------------------------------
-        # 只要某個路徑被任何規則判定為異常，就會被加入這裡。
+        # 初始化（init）靜默路徑集合。
         self.muted_paths: Set[str] = set()
 
+    # 我們定義（def）判斷是否應該處理事件的函式。
     def should_process(self, event) -> bool:
-        """
-        根據「三大智能規則 (R1/R3/R4)」與靜默名單，
-        判斷一個檔案系統事件是否應該被進一步處理。
-
-        WHY:
-        ----
-        - 哨兵每秒可能收到數百筆事件，不能全部處理。
-        - SmartThrottler 會根據異常行為（過熱、爆量、體積暴漲）
-        決定是否將路徑加入靜默名單。
-
-        WHAT:
-        -----
-        - 印出可觀察性診斷資訊（Probe v1.0）
-        - 依序套用：
-        (1) 靜默名單
-        (2) R1：單檔過熱
-        (3) R3：爆量創建
-        (4) R4：體積異常增長
-
-        HOW:
-        ----
-        - 使用時間窗（timestamp window）處理事件行為序列
-        - 若任一規則觸發，將路徑加入 muted_paths 並回傳 False
-        """
-
+        # 獲取（get）事件路徑。
         path = event.src_path
-        now = datetime.now()
-
-        # ----------------------------------------------------------------------
-        # 【診斷探針 v1.0】顯示事件來源與時間
-        # ----------------------------------------------------------------------
-        print(f"🕵️ PID:{os.getpid()} [{now.strftime('%H:%M:%S.%f')}] 收到事件: {event.event_type} @ '{os.path.basename(path)}'")
-        sys.stdout.flush()
-
-        # ----------------------------------------------------------------------
-        # 1. 通用規則：若路徑或其父目錄已在靜默名單 → 直接拒絕
-        # ----------------------------------------------------------------------
+        # 如果（if）路徑或其父目錄在靜默名單中...
         if path in self.muted_paths or os.path.dirname(path) in self.muted_paths:
-            print(f"  -> 決策: 拒絕 (路徑已在靜默黑名單中)")
-            sys.stdout.flush()
+            # 返回（return）False，拒絕處理。
             return False
 
-        # ----------------------------------------------------------------------
-        # 2. R1 規則：單檔「短時間內過熱」的異常修改
-        # ----------------------------------------------------------------------
-        if event.event_type == 'modified':
-            timestamps_r1 = self.hot_events.get(path, [])
-            valid_timestamps_r1 = [t for t in timestamps_r1 if now - t < self.hot_period]
-            valid_timestamps_r1.append(now)
-            self.hot_events[path] = valid_timestamps_r1
-
-            print(f"  -> R1 計數: 文件 '{os.path.basename(path)}' 的修改事件計數為 {len(valid_timestamps_r1)} / {self.hot_threshold}")
-            sys.stdout.flush()
-
-            if len(valid_timestamps_r1) >= self.hot_threshold:
-                print(f"🔥 [智能靜默 R1] 偵測到文件 '{path}' 在短時間內事件過多，已將其臨時靜默。")
-                self.muted_paths.add(path)
-                # R1 命中後清理記錄，避免資料膨脹
-                self.hot_events.pop(path, None)
-                return False
-
-        # ----------------------------------------------------------------------
-        # 3. R3 規則：某資料夾在短時間內爆量創建檔案
-        # ----------------------------------------------------------------------
+        # 獲取（get）當前時間。
+        now = datetime.now()
+        
+        # --- R3: 爆量創建檢查 ---
+        # 如果（if）是創建事件...
         if event.event_type == 'created':
-            dir_path = os.path.dirname(path)
-            timestamps = self.creation_timestamps.get(dir_path, [])
-            valid_timestamps = [t for t in timestamps if now - t < self.burst_creation_period]
-            valid_timestamps.append(now)
-            self.creation_timestamps[dir_path] = valid_timestamps
-
-            print(f"  -> R3 計數: 目錄 '{os.path.basename(dir_path)}' 的創建事件計數為 {len(valid_timestamps)} / {self.burst_creation_threshold}")
-            sys.stdout.flush()
-
-            if len(valid_timestamps) > self.burst_creation_threshold:
-                print(f"🔥 [智能靜默 R3] 偵測到目錄 '{dir_path}' 發生爆量創建，已將其臨時靜默。")
-                self.muted_paths.add(dir_path)
+            # 獲取（dirname）父目錄。
+            parent_dir = os.path.dirname(path)
+            # 獲取（get）該目錄的歷史事件。
+            events = self.dir_events.get(parent_dir, [])
+            # 過濾（filter）出時間區間內的有效事件。
+            valid = [t for t in events if now - t < self.burst_period]
+            # 加入（append）當前時間。
+            valid.append(now)
+            # 更新（update）字典。
+            self.dir_events[parent_dir] = valid
+            
+            # 如果（if）超過閾值...
+            if len(valid) > self.burst_threshold:
+                # 輸出（print）靜默警告。
+                print(f"🔥 [智能靜默] 爆量創建 (R3): {os.path.basename(parent_dir)}", flush=True)
+                # 加入（add）靜默名單。
+                self.muted_paths.add(parent_dir)
+                # 清除（pop）事件記錄。
+                self.dir_events.pop(parent_dir, None)
+                # 返回（return）False。
                 return False
 
-        # ----------------------------------------------------------------------
-        # 4. R4 規則：文件體積在短時間內異常暴漲（例如失控 log）
-        # ----------------------------------------------------------------------
+        # --- R1: 單檔過熱檢查 ---
+        # 如果（if）是修改事件...
         if event.event_type == 'modified':
-            try:
-                current_size = os.stat(path).st_size
-                history = self.size_history.get(path, [])
-                valid_history = [h for h in history if now - h[0] < self.size_growth_period]
+            # 獲取（get）該檔案的歷史事件。
+            timestamps = self.hot_events.get(path, [])
+            # 過濾（filter）有效事件。
+            valid = [t for t in timestamps if now - t < self.hot_period]
+            # 加入（append）當前時間。
+            valid.append(now)
+            # 更新（update）字典。
+            self.hot_events[path] = valid
+            
+            # 如果（if）超過閾值...
+            if len(valid) >= self.hot_threshold:
+                # 輸出（print）靜默警告。
+                print(f"🔥 [智能靜默] 文件過熱 (R1): {os.path.basename(path)}", flush=True)
+                # 加入（add）靜默名單。
+                self.muted_paths.add(path)
+                # 清除（pop）事件記錄。
+                self.hot_events.pop(path, None)
+                # 返回（return）False。
+                return False
 
-                initial_size = valid_history[0][1] if valid_history else 0
-                growth = current_size - initial_size
-
-                print(f"  -> R4 檢測: 文件 '{os.path.basename(path)}' 體積增長 {growth / (1024*1024):.2f} MB / {self.size_growth_threshold_bytes / (1024*1024):.2f} MB")
-                sys.stdout.flush()
-
-                if valid_history and growth > self.size_growth_threshold_bytes:
-                    print(f"🔥 [智能靜默 R4] 偵測到文件 '{path}' 體積異常增長，已將其臨時靜默。")
+        # --- R4: 體積異常檢查 ---
+        # 如果（if）是修改事件且帶有大小資訊...
+        if event.event_type == 'modified' and hasattr(event, 'file_size'):
+            # 獲取（get）當前大小。
+            current_size = event.file_size
+            # 獲取（get）歷史記錄。
+            history = self.file_sizes.get(path, [])
+            # 過濾（filter）有效歷史。
+            valid_history = [(t, s) for t, s in history if now - t < self.size_period]
+            
+            # 如果（if）有歷史記錄...
+            if valid_history:
+                # 取出（get）最早的大小。
+                _, old_size = valid_history[0]
+                # 計算（calc）增長量。
+                growth = current_size - old_size
+                # 如果（if）增長超過閾值...
+                if growth > self.size_threshold_bytes:
+                    # 輸出（print）靜默警告。
+                    print(f"🔥 [智能靜默] 體積異常 (R4): {os.path.basename(path)} (+{growth/1024/1024:.2f}MB)", flush=True)
+                    # 加入（add）靜默名單。
                     self.muted_paths.add(path)
+                    # 清除（pop）記錄。
+                    self.file_sizes.pop(path, None)
+                    # 返回（return）False。
                     return False
+            
+            # 加入（append）當前記錄。
+            valid_history.append((now, current_size))
+            # 更新（update）字典。
+            self.file_sizes[path] = valid_history
 
-                valid_history.append((now, current_size))
-                self.size_history[path] = valid_history
-
-            except (FileNotFoundError, IndexError):
-                # 若事件發生時檔案消失，重新建立記錄
-                self.size_history[path] = [(now, current_size)]
-            except Exception as e:
-                print(f"⚠️ [SmartThrottler] 在檢查文件體積時出錯: {e}", file=sys.stderr)
-
-        # ----------------------------------------------------------------------
-        # 5. 所有檢查均未命中 → 放行
-        # ----------------------------------------------------------------------
-        print(f"  -> 最終決策: 放行")
-        sys.stdout.flush()
+        # 返回（return）True，允許處理。
         return True
 
-# ==============================================================================
-# 專案路徑注入（Project Path Injection）
-# ==============================================================================
+# 我們定義（class）模擬事件類別。
+class MockEvent:
+    # 我們定義（def）初始化函式。
+    def __init__(self, src_path, event_type='modified', file_size=0):
+        self.src_path = src_path
+        self.event_type = event_type
+        self.is_directory = False
+        self.file_size = file_size
 
-# HACK:
-# watchdog 子進程的工作目錄（cwd）並不等於專案根目錄，導致無法直接 import src.core.daemon。
-# 為了讓哨兵能調用後端 daemon API（handle_manual_update），我們需要將專案根目錄
-# 手動加入 sys.path。這是一個最小化、可接受的全域修補。
-project_root_for_import = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-if project_root_for_import not in sys.path:
-    sys.path.insert(0, project_root_for_import)
+# 4. 鐵肺核心 (FileSnapshot v2 - 支援大小)
+# 我們定義（class）檔案快照類別。
+class FileSnapshot:
+    # 我們定義（def）初始化函式。
+    def __init__(self, path: str):
+        # 初始化（init）檔案字典：路徑 -> (mtime, size)。
+        self.files: Dict[str, Tuple[float, int]] = {}
+        # 執行（scan）掃描。
+        self.scan(path)
 
-from src.core import daemon
+    # 我們定義（def）掃描函式。
+    def scan(self, root_path: str):
+        # 使用（walk）遍歷目錄。
+        for root, dirs, files in os.walk(root_path):
+            # 過濾（filter）忽略的目錄。
+            dirs[:] = [d for d in dirs if d not in SENTRY_INTERNAL_IGNORE]
+            # 遍歷（loop）檔案。
+            for file in files:
+                # 如果（if）檔案在忽略名單中...
+                if file in SENTRY_INTERNAL_IGNORE: continue
+                # 組合（join）完整路徑。
+                full_path = os.path.join(root, file)
+                # 嘗試（try）獲取檔案狀態。
+                try:
+                    # 呼叫（stat）獲取狀態。
+                    stat = os.stat(full_path)
+                    # 儲存（save）修改時間和大小。
+                    self.files[full_path] = (stat.st_mtime, stat.st_size)
+                # 忽略（except）錯誤。
+                except OSError: pass
 
-
-# ==============================================================================
-# SentryEventHandler：哨兵事件處理器（v9.1 - 重生版）
-# ==============================================================================
-class SentryEventHandler(FileSystemEventHandler):
-    """
-    WHY（為什麼需要？）
-    --------------------
-    - SmartThrottler 做「決策」，但不負責「事情後要做什麼」。
-    - SentryEventHandler 是哨兵的主控中樞，負責：
-        * 套用 R5 結構性防火牆（阻擋危險路徑）
-        * 阻擋 output_file 自觸發事件（避免監控迴圈）
-        * 呼叫智能抑制器（R1 / R3 / R4）
-        * 寫入 .sentry_status（哨兵郵箱）
-        * 回報 daemon，觸發後端更新
-
-    WHAT（它做什麼？）
-    -------------------
-    - 對每筆事件套用一整條安全管線（Firewall → Throttler → Status → Update）
-    - 若事件安全 → 觸發 daemon.handle_manual_update
-
-    HOW（它怎麼做？）
-    -------------------
-    - on_any_event 是 watchdog 的統一事件入口
-    - 所有事件在進入 SmartThrottler 前先通過 R5 防火牆
-    - 使用 OUTPUT-FILE-BLACKLIST 避免監控自己寫出的 output_file
-    """
-
-    def __init__(self, throttler: SmartThrottler, project_uuid: str,
-                output_file_paths: Optional[List[str]] = None):
-
-        self.throttler = throttler
-        self.project_uuid = project_uuid
-
-        # 用於偵測「muted_paths 是否變動」以決定是否寫入 .sentry_status
-        self._last_muted_paths_state: Set[str] = set()
-
-        # DEFENSE:
-        # OUTPUT-FILE-BLACKLIST：只要是 output_file 本身（系統寫入的結果）
-        # 就必須永遠忽略，否則「寫檔 → 觸發事件 → 又寫檔」會形成監控迴圈。
-        self.output_file_paths = set(output_file_paths) if output_file_paths else set()
-
-
-    # --------------------------------------------------------------------------
-    # watchdog 的總入口：所有事件都會先進來這裡
-    # --------------------------------------------------------------------------
-    def on_any_event(self, event):
-
-        # ----------------------------------------------------------------------
-        # 步驟 1：R5 結構性防火牆（Structural Firewall）
-        # ----------------------------------------------------------------------
-        # 跳過所有目錄事件（我們只關心檔案變動）
-        if event.is_directory:
-            return
-
-        if isinstance(event.src_path, str):
-            # 將路徑拆成多個片段（例如 /path/to/temp/x → ["path","to","temp","x"]）
-            normalized_path = os.path.normpath(event.src_path)
-            path_parts = normalized_path.split(os.sep)
-
-            # 若任一片段屬於 SENTRY_INTERNAL_IGNORE，就必須拒絕
-            if any(part in SENTRY_INTERNAL_IGNORE for part in path_parts):
-                return  # 靜默拒絕，不寫 log（這是刻意設計的）
-
-
-        # ----------------------------------------------------------------------
-        # 步驟 1.5：OUTPUT-FILE-BLACKLIST（避免監控迴圈）
-        # ----------------------------------------------------------------------
-        # 若這個事件來自 output_file → 直接忽略
-        if normalized_path in self.output_file_paths:
-            return
-
-
-        # ----------------------------------------------------------------------
-        # 步驟 2：交給智能抑制器（R1 / R3 / R4）
-        # ----------------------------------------------------------------------
-        should_proceed = self.throttler.should_process(event)
-
-
-        # ----------------------------------------------------------------------
-        # 步驟 3：郵箱更新（無條件執行）
-        # ----------------------------------------------------------------------
-        # 若 muted_paths 有變動 → 寫入 temp/<uuid>.sentry_status
-        self._check_and_update_status_file()
-
-
-        # ----------------------------------------------------------------------
-        # 步驟 4：若通過所有檢查 → 執行核心更新
-        # ----------------------------------------------------------------------
-        if should_proceed:
-            print(f"[{time.strftime('%H:%M:%S')}] [安全事件] 偵測到: {event.event_type} - 路徑: {event.src_path}")
-            sys.stdout.flush()
-            daemon.handle_manual_update([self.project_uuid])
-
-
-    def _check_and_update_status_file(self):
-        """
-        檢查靜默列表（muted_paths）是否發生變化，
-        若有變化，便將其寫入專案專屬的哨兵郵箱（.sentry_status）。
-
-        WHY：
-        -----
-        - SmartThrottler 的決策結果（muted_paths）必須回傳給 daemon
-        才能讓後端知道「哪些路徑已被臨時靜默」。
-        - 哨兵必須透過檔案（temp/<uuid>.sentry_status）進行訊號傳遞，
-        因為子進程無法直接修改父進程的記憶體狀態。
-
-        WHAT：
-        ------
-        - 檢查靜默名單是否變動（避免反覆寫檔）
-        - 寫入 JSON 格式的 mutated paths 列表
-        - 印診斷探針訊息（Probe v2.0）
-
-        HOW：
-        -----
-        - 使用本地 /tmp/<uuid>.sentry_status 作為哨兵郵箱
-        - 只有靜默名單變動時才寫入，避免磁碟 I/O 過量
-        """
-
-        current_muted_paths = self.throttler.muted_paths
-
-        # ------------------------------------------------------------------
-        # 若靜默名單與上次記錄不同 → 必須寫入郵箱
-        # ------------------------------------------------------------------
-        if current_muted_paths != self._last_muted_paths_state:
-
-            print(f"📫 [{time.strftime('%H:%M:%S')}] [情報更新] 靜默列表變化，正在寫入郵箱: {list(current_muted_paths)}")
-            sys.stdout.flush()
-
-            status_file_path = f"/tmp/{self.project_uuid}.sentry_status"
-
-            try:
-                # 將靜默名單寫入哨兵郵箱（狀態檔）
-                with open(status_file_path, 'w', encoding='utf-8') as f:
-                    json.dump(list(current_muted_paths), f)
-
-                # ------------------------------------------------------------------
-                # 【診斷探針 v2.0】成功回執（讓工程師可觀察整體安全回路）
-                # ------------------------------------------------------------------
-                print(f"✅ [{time.strftime('%H:%M:%S')}] 郵箱寫入成功: {status_file_path}")
-                sys.stdout.flush()
-
-                # 更新快取 → 避免下次不必要的寫入
-                self._last_muted_paths_state = current_muted_paths.copy()
-
-            except IOError as e:
-                # DEFENSE：確保錯誤會被看見，而不是靜默失敗
-                print(f"❌ [{time.strftime('%H:%M:%S')}] 寫入郵箱失敗: {e}", file=sys.stderr)
-
-# ==============================================================================
-# main：哨兵工人的主入口（v9.1 - 重生版）
-# ==============================================================================
-
+# 5. 主入口
+# 我們定義（def）主函式。
 def main():
-    """
-    哨兵子進程（Sentry Worker）的啟動入口。
-
-    WHY（為什麼需要這個入口？）
-    ----------------------------
-    - daemon.py 必須能以「子進程」方式啟動哨兵。
-    - 每個哨兵進程代表一個專案，並負責該專案的實時檔案監控。
-    - 哨兵需要能獨立執行、獨立關閉、獨立自癒。
-    
-    WHAT（這裡會做什麼？）
-    ------------------------
-    1. 解析啟動參數（UUID / 專案路徑 / output_file 黑名單）
-    2. 初始化 SmartThrottler（智能抑制器）
-    3. 建立 SentryEventHandler（事件管線）
-    4. 使用 PollingObserver 啟動輪詢式監控
-    5. 進入永續事件迴圈，直到父程序要求停止
-
-    HOW（它是怎麼做到的？）
-    --------------------------
-    - 透過 watchdog 的 PollingObserver 進行跨平台監控
-    - 每秒 sleep(1) 避免資源佔用
-    - 捕捉 KeyboardInterrupt，但實際上 SIGINT 已被忽略
-    """
-
-    # ----------------------------------------------------------------------
-    # 1. 解析命令列參數（UUID、監控路徑、output_file 黑名單）
-    # ----------------------------------------------------------------------
-    if len(sys.argv) < 3 or len(sys.argv) > 4:
-        print("用法: python sentry_worker.py <project_uuid> <project_path> [output_files]", file=sys.stderr)
+    # 如果（if）參數不足...
+    if len(sys.argv) < 3:
+        # 退出（exit）。
         sys.exit(1)
 
+    # 獲取（get）專案 UUID。
     project_uuid = sys.argv[1]
-    project_path_to_watch = sys.argv[2]
+    # 獲取（get）專案路徑。
+    project_path = sys.argv[2]
+    
+    # 初始化（init）輸出檔案列表。
+    output_files = []
+    # 如果（if）有提供輸出檔案參數...
+    if len(sys.argv) > 3:
+        # 解析（split）逗號分隔的字串。
+        output_files = [p.strip() for p in sys.argv[3].split(',') if p.strip()]
+    # 轉為（set）集合以加速查詢。
+    output_file_set = set(output_files)
 
-    # OUTPUT-FILE-BLACKLIST 機制：
-    # 以逗號分隔的字串 → 還原為 list → 再轉為 set
-    output_files_str = sys.argv[3] if len(sys.argv) == 4 else ''
-    output_file_paths = [p.strip() for p in output_files_str.split(',') if p.strip()]
-
-
-    # ----------------------------------------------------------------------
-    # 2. 防禦：檢查監控目錄是否存在
-    # ----------------------------------------------------------------------
-    if not os.path.exists(project_path_to_watch):
-        print(f"錯誤: 監控路徑 '{project_path_to_watch}' 不存在。", file=sys.stderr)
-        sys.exit(1)
-
-    # ----------------------------------------------------------------------
-    # 3. 啟動訊息（可觀察性）
-    # ----------------------------------------------------------------------
-    print(f"哨兵工人已啟動。PID: {os.getpid()}。負責專案: {project_uuid}")
-    print(f"將使用「可靠輪詢」模式，監控目錄: {project_path_to_watch}")
-    sys.stdout.flush()
-
-    # OUTPUT-FILE-BLACKLIST 診斷訊息
-    if output_file_paths:
-        print(f"【OUTPUT-FILE-BLACKLIST】已加載 {len(output_file_paths)} 個輸出文件到黑名單:")
-        for path in output_file_paths:
-            print(f"  - {path}")
+    # 輸出（print）啟動訊息。
+    print(f"哨兵啟動 (v11.2 完全體)。PID: {os.getpid()}", flush=True)
+    
+    # --- 補回黑名單日誌 ---
+    if output_files:
+        print(f"【OUTPUT-FILE-BLACKLIST】已加載 {len(output_files)} 個輸出文件到黑名單 (路徑詳情隱藏)", flush=True)
     else:
-        print("【OUTPUT-FILE-BLACKLIST】未接收到任何輸出文件黑名單")
-    sys.stdout.flush()
-
-
-    # ----------------------------------------------------------------------
-    # 4. 建立核心物件（SmartThrottler + SentryEventHandler）
-    # ----------------------------------------------------------------------
+        print("【OUTPUT-FILE-BLACKLIST】未接收到任何輸出文件黑名單", flush=True)
+    # --------------------
+    
+    # 初始化（init）智能節流器。
     throttler = SmartThrottler()
-    event_handler = SentryEventHandler(
-        throttler=throttler,
-        project_uuid=project_uuid,
-        output_file_paths=output_file_paths
-    )
+    # 初始化（init）上一次的靜默狀態。
+    last_muted_state: Set[str] = set()
 
-    # ----------------------------------------------------------------------
-    # 5. 啟動輪詢式檔案監控（PollingObserver）
-    # ----------------------------------------------------------------------
-    observer = PollingObserver(timeout=2)  # 輪詢週期：2 秒
-    observer.schedule(event_handler, project_path_to_watch, recursive=True)
-    observer.start()
+    # 我們定義（def）更新狀態檔的函式。
+    def update_status_file():
+        # 宣告（nonlocal）使用外部變數。
+        nonlocal last_muted_state
+        # 獲取（get）當前靜默名單。
+        current_muted = throttler.muted_paths
+        # 如果（if）狀態有變動...
+        if current_muted != last_muted_state:
+            # 定義（define）狀態檔路徑。
+            status_file = f"/tmp/{project_uuid}.sentry_status"
+            # 嘗試（try）寫入檔案。
+            try:
+                # 開啟（open）檔案。
+                with open(status_file, 'w', encoding='utf-8') as f:
+                    # 寫入（dump）JSON。
+                    json.dump(list(current_muted), f)
+                # 更新（update）緩存狀態。
+                last_muted_state = current_muted.copy()
+            # 忽略（except）錯誤。
+            except:
+                pass
 
-    # ----------------------------------------------------------------------
-    # 6. 永續事件迴圈：哨兵的「生命週期」
-    # ----------------------------------------------------------------------
+    # 輸出（print）建立快照訊息。
+    print("[Step] 建立初始快照...", flush=True)
+    # 建立（create）初始快照。
+    last_snapshot = FileSnapshot(project_path)
+    # 輸出（print）監控中訊息。
+    print(f"[Step] 監控中 (Files: {len(last_snapshot.files)})", flush=True)
+
+    # 嘗試（try）進入主迴圈。
     try:
+        # 無窮迴圈（while True）。
         while True:
-            time.sleep(1)
+            # 休眠（sleep）2 秒。
+            time.sleep(2)
+            
+            # 建立（create）當前快照。
+            current_snapshot = FileSnapshot(project_path)
+            # 初始化（init）有效變動標記。
+            any_effective_change = False
+            
+            # 1. 檢查變動 (新增/修改)
+            # 遍歷（loop）當前快照中的檔案。
+            for path, info in current_snapshot.files.items():
+                # 如果（if）是輸出檔案，跳過（continue）。
+                if path in output_file_set: continue
+                
+                # 解構（unpack）資訊。
+                mtime, size = info
+                # 獲取（get）舊資訊。
+                old_info = last_snapshot.files.get(path)
+                
+                # 如果（if）舊資訊不存在（新增）...
+                if old_info is None:
+                    # 建立（create）模擬事件。
+                    evt = MockEvent(path, 'created', size)
+                    # 如果（if）通過大腦審查...
+                    if throttler.should_process(evt): 
+                        # 輸出（print）偵測訊息。
+                        print(f"[{time.strftime('%H:%M:%S')}] [偵測] created: {os.path.basename(path)}", flush=True)
+                        # 標記（mark）為有效變動。
+                        any_effective_change = True
+                
+                # 否則（elif），如果時間或大小變了（修改）...
+                elif mtime > old_info[0] or size != old_info[1]:
+                    # 建立（create）模擬事件。
+                    evt = MockEvent(path, 'modified', size)
+                    # 如果（if）通過大腦審查...
+                    if throttler.should_process(evt): 
+                        # 輸出（print）偵測訊息。
+                        print(f"[{time.strftime('%H:%M:%S')}] [偵測] modified: {os.path.basename(path)}", flush=True)
+                        # 標記（mark）為有效變動。
+                        any_effective_change = True
+            
+            # 2. 檢查刪除
+            # 遍歷（loop）舊快照中的檔案。
+            for path in last_snapshot.files:
+                # 如果（if）不在當前快照中（被刪除）...
+                if path not in current_snapshot.files:
+                    # 如果（if）不是輸出檔案...
+                    if path not in output_file_set:
+                        # 輸出（print）偵測訊息。
+                        print(f"[{time.strftime('%H:%M:%S')}] [偵測] deleted: {os.path.basename(path)}", flush=True)
+                        # 標記（mark）為有效變動。
+                        any_effective_change = True
+
+            # 更新（update）狀態檔。
+            update_status_file()
+            
+            # 如果（if）有有效變動...
+            if any_effective_change:
+                # 觸發（trigger）更新指令。
+                trigger_update_cli(project_uuid)
+            
+            # 如果（if）快照有變化...
+            if current_snapshot.files != last_snapshot.files:
+                # 更新（update）基準快照。
+                last_snapshot = current_snapshot
+
+    # 捕獲（except）中斷信號。
     except KeyboardInterrupt:
-        # 實務上 SIGINT 已被忽略，但保留此段作為安全閘
-        print("\n收到退出信號，正在停止觀察者...")
-    finally:
-        observer.stop()
-        observer.join()
-        print("觀察者已成功停止。")
+        pass
+    # 捕獲（except）所有其他異常。
+    except Exception as e:
+        # 輸出（print）崩潰訊息。
+        print(f"哨兵崩潰: {e}", file=sys.stderr)
 
-
-# Python 標準入口：若本檔案被直接執行，則啟動 main()
+# 如果（if）直接執行此腳本...
 if __name__ == "__main__":
+    # 執行（call）主函式。
     main()
