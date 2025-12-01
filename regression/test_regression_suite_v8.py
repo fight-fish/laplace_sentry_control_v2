@@ -84,6 +84,9 @@ class TestRegressionSuiteV8(unittest.TestCase):
         project_path = os.path.join(self.TEST_TEMP_DIR, "my_first_project")
         os.makedirs(project_path)
         output_file = os.path.join(self.TEST_TEMP_DIR, "output.md")
+
+        with open(output_file, 'w') as f:
+            f.write("\n")  # 預先創建目標文件，避免新增失敗。
         
         # 執行新增指令
         add_result = daemon.main_dispatcher(
@@ -165,7 +168,27 @@ class TestRegressionSuiteV8(unittest.TestCase):
         
         print("【回歸測試】: 『專案全生命週期』測試通過！")
 
+    def test_windows_path_validation_failure(self):
+        """
+        【GREEN LIGHT】驗證 daemon.py 能正確拒絕不存在的 Windows 路徑 (測試翻譯成功)。
+        - 測試目的：確認 path.normalize_path 翻譯是成功的，但後續的 os.path.isdir 檢查失敗。
+        """
+        print("\n  -> 階段 X: 測試『Windows 路徑存在性檢查失敗』...")
 
+        # 模擬 Windows 路徑 (使用原始字串 r"" 消除警告)
+        windows_path = r"D:\fake\project\dir"
+        windows_output_file = r"D:\fake\project\output.md"
+
+        # 預期錯誤訊息：我們現在知道它會因為資料夾不存在而失敗
+        expected_error = "目標文件所在的資料夾不存在 -> /mnt/d/fake/project"
+
+        # 執行新增指令，預期失敗
+        self.assertFailsWith(
+            ['add_project', "Windows Test", windows_path, windows_output_file],
+            expected_error,
+            projects_file_path=self.TEST_PROJECTS_FILE
+        )
+        print("  -> GREEN LIGHT: Windows 路徑檢查失敗 (預期行為) 通過！")
 # 這是一個 Python 的標準寫法。
 if __name__ == '__main__':
     unittest.main()

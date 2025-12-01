@@ -25,55 +25,72 @@ import time     # 用於處理「時間（time）」相關操作。
 # 它的作用是將各種亂七八糟的路徑，都「正規化」成我們系統內部統一的、乾淨的格式。
 def normalize_path(path_str):
     
-    # DEFENSE:
-    # 為了防止後續操作因為接收到非字串而出錯，我們先做一個防禦性檢查。
-    # 我們用「isinstance」來判斷，如果（if not）傳入的「path_str」不是一個「字串（str）」...
+    # DEFENSE: 防禦性檢查
     if not isinstance(path_str, str):
-        # ...我們就直接 返回（return）一個空字串。
         return ""
 
-    # 我們先用「strip()」方法，去掉路徑頭尾可能存在的空白字符。
+    # 去掉頭尾空白
     p = path_str.strip()
 
-    # HACK:
-    # 這是為了處理一個真實世界的「髒數據」問題：從 Windows 檔案總管複製的路徑，
-    # 常常會被多層引號（如 "'...'"）包裹。
-    # 我們用一個「while」循環，來不斷地「剝洋蔥」，直到最外層不再是引號。
+    # HACK: 剝離多層引號
     while p.startswith(('"', "'")) and p.endswith(('"', "'")):
         p = p[1:-1].strip()
 
-    # TAG: PORT (可移植性)
-    # 我們用「replace()」方法，將所有 Windows 風格的反斜線（\），都替換為 Linux 風格的正斜線（/）。
-    # 這確保了我們的路徑處理邏輯在跨平台時的兼容性。
+    # TAG: PORT (可移植性) - 統一轉為正斜線
     p = p.replace("\\", "/")
 
-    # HACK:
-    # 這是為了處理另一個真實世界的「髒數據」問題：來自 WSL 的 UNC 路徑。
-    # 例如 `//wsl.localhost/Ubuntu/home/user`。
-    # 我們用「re.match」和一段複雜的正規表達式，來精準地匹配這種特殊格式。
-    match_wsl = re.match(r"^/{1,2}wsl\.localhost/([^/]+)/(.*)", p, re.IGNORECASE)
-    # 如果（if）匹配成功...
-    if match_wsl:
-            # 【智能判斷】只有在非 Windows 環境 (Linux/WSL) 才需要砍掉主機名轉成本地路徑。
-            # 在 Windows 中，我們保留 //wsl.localhost，因為它是合法的網路路徑。
-            if os.name != 'nt':
-                p = "/" + match_wsl.group(2)
-
-# HACK:
-    # 這是為了處理 Windows 的磁碟機代號路徑。
-    match_drive = re.match(r"([A-Za-z]):/(.*)", p)
+    # ---------------------------------------------------------
+    # 策略 1: 處理 Windows 磁碟機代號 (例如 C:/Users)
+    # ---------------------------------------------------------
+    # 我們使用更寬容的 regex，允許斜線或反斜線。
+    match_drive = re.match(r"^([A-Za-z]):[/\\]?(.*)", p)
     if match_drive:
         # 【修正】只有在非 Windows (也就是 Linux/WSL) 環境下，才需要轉成 /mnt/
-        # 如果現在就是 Windows (os.name == 'nt')，我們保留 C:/ 這種格式就好
         if os.name != 'nt':
             drive_letter = match_drive.group(1).lower()
             rest_of_path = match_drive.group(2)
+            
+            # 移除開頭可能多餘的斜線
+            if rest_of_path.startswith('/'):
+                rest_of_path = rest_of_path[1:]
+                
+            # 重新組裝成 WSL 的掛載路徑
             p = f"/mnt/{drive_letter}/{rest_of_path}"
+        else:
+            # 如果是在 Windows 下，我們確保它正規化為 C:/Users 格式
+            drive_letter = match_drive.group(1).upper()
+            rest_of_path = match_drive.group(2)
+            p = f"{drive_letter}:/{rest_of_path}"
 
-# 最後，我們用「re.sub()」將路徑中可能出現的多個連續斜線壓縮為單個斜線。
-    # 【修正】但在 Windows 下，我們必須保護開頭的 UNC 雙斜線 (//)，不能把它壓成單斜線。
+        # 既然匹配到了磁碟機，就不用看 WSL UNC 了，直接回傳
+        # 這裡也要做最後的斜線壓縮
+        return re.sub(r"/{2,}", "/", p)
+
+    # ---------------------------------------------------------
+    # 策略 2: 處理 WSL UNC 路徑 (例如 //wsl.localhost/Ubuntu/home/user)
+    # ---------------------------------------------------------
+    # 如果是在非 Windows 環境 (Linux/WSL)
+    if os.name != 'nt':
+        # 嘗試匹配 //wsl... 或 /wsl...
+        # Group 1: 機器名/發行版 (忽略)
+        # Group 2: 真實路徑
+        # 這裡的 Regex 變更寬容：只要看到 wsl 開頭，後面接一個 dist name，再接路徑
+        match_wsl = re.match(r"^/{1,2}wsl(?:[\.a-z0-9-]*)/([^/]+)/(.*)", p, re.IGNORECASE)
+        
+        if match_wsl:
+            p = "/" + match_wsl.group(2)
+        
+        # 【暴力保險】如果上面的 Regex 失敗，但路徑裡包含 "/home/"
+        # 我們假設這就是一個 WSL 路徑，直接取 /home/ 之後的部分
+        elif "/home/" in p:
+            home_idx = p.find("/home/")
+            p = p[home_idx:]
+
+    # ---------------------------------------------------------
+    # 收尾：壓縮斜線
+    # ---------------------------------------------------------
+    # 【修正】但在 Windows 下，我們必須保護開頭的 UNC 雙斜線 (//)
     if os.name == 'nt' and p.startswith("//"):
-        # 如果是 UNC 路徑，我們先把頭切掉，處理後面的斜線，再接回去
         p_rest = re.sub(r"/{2,}", "/", p[2:])
         p = "//" + p_rest
     else:
