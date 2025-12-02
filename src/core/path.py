@@ -65,6 +65,14 @@ def normalize_path(path_str):
         # 既然匹配到了磁碟機，就不用看 WSL UNC 了，直接回傳
         # 這裡也要做最後的斜線壓縮
         return re.sub(r"/{2,}", "/", p)
+    
+    # HACK: 強制將 WSL 的 /mnt/[A-Z]/ 轉為小寫 /mnt/[a-z]/
+    if os.name != 'nt':
+        match_mnt = re.match(r"^/mnt/([A-Z])(/.*|$)", p)
+        if match_mnt:
+            drive = match_mnt.group(1).lower()
+            rest = match_mnt.group(2)
+            p = f"/mnt/{drive}{rest}"
 
     # ---------------------------------------------------------
     # 策略 2: 處理 WSL UNC 路徑 (例如 //wsl.localhost/Ubuntu/home/user)
