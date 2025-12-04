@@ -1,4 +1,81 @@
 
+# **v7.2.0 — Sentry System Stable Release**
+**（2025-12-04）**
+
+### **摘要**
+v7.2.0 是 Sentry System 首個「前後端皆可完整運作」的正式穩定版本。  
+整合 WSL 後端（v6.7 核心）與 Windows UI v1，  
+達成「可安裝、可啟動、可監控、可寫入、可管理」的完整能力。
+
+---
+
+## **✨ 新功能（New）**
+
+### **1. Windows UI v1 正式上線**
+UI v1 完成以下所有核心能力：
+
+- **生物感動畫 The Eye（眨眼 / 掃視 / 呼吸 / 吞噬）**
+- **Dashboard 控制台（list / logs / write targets / control）**
+- **三層 Intention Filter（舊專案 → 智慧配對 → 完整註冊）**
+- **拖曳註冊（drag-and-drop onboarding）**
+- **系統托盤整合（Tray Icon + Menu）**
+
+### **2. 完整 UI ↔ 後端橋接（adapter.py）**
+- Windows 路徑 → WSL 路徑轉換  
+- 呼叫後端主入口：  
+  `wsl python main.py <command>`  
+- 狀態解析（logs / errors / json output）
+
+---
+
+## **🔧 改進（Improvements）**
+
+### **1. 後端全測試通過（10/10 Passed）**
+測試涵蓋：
+
+- 路徑正規化  
+- 靜默機制（SmartThrottler R1–R4）  
+- Sentry lifecycle（start/stop/status）  
+- Multi-sentry registry  
+- 持久化（PID / status files）  
+- 專案新增 / 刪除 / 修改 / 更新  
+
+→ 後端已達封包品質。
+
+---
+
+## **🐛 修復（Fixes）**
+
+- Zombie PID 完全移除  
+- edit_project / delete_project 全面穩定  
+- UI 拖曳策略不再卡死  
+- logs 回傳格式統一  
+- adapter 在參數轉換中的 escaping bug 修復  
+
+---
+
+## **🚀 本版本意義**
+v7.2.0 被視為：
+
+> **Sentry System 的第一個可交付的正式產品版本**
+
+它是整個 Laplace Sentry 生態系的第一個 milestone：
+
+- UI 可正常使用  
+- 後端完全穩定  
+- 跨系統通訊完善  
+- 測試全部通過  
+- 可開始封裝 Installer
+
+---
+
+## **📦 下一版（v7.3.0 建議方向）**
+- Windows Installer（含自動建立 venv）
+- WSL 自動安裝腳本（install.sh）
+- UI ↔ 後端版本匹配（handshake）
+- 連線錯誤提示強化
+
+
 # ## **v7.1.0-beta — Sentry UI v2.0 Sandbox**
 **（2025-12-03）**
 
