@@ -126,7 +126,7 @@ class SmartThrottler:
             # 如果（if）超過閾值...
             if len(valid) > self.burst_threshold:
                 # 輸出（print）靜默警告。
-                print(f"🔥 [智能靜默] 爆量創建 (R3): {os.path.basename(parent_dir)}", flush=True)
+                print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 🔥 [智能靜默] 爆量創建 (R3): {os.path.basename(parent_dir)}", flush=True)
                 # 加入（add）靜默名單。
                 self.muted_paths.add(parent_dir)
                 # 清除（pop）事件記錄。
@@ -149,8 +149,7 @@ class SmartThrottler:
             # 如果（if）超過閾值...
             if len(valid) >= self.hot_threshold:
                 # 輸出（print）靜默警告。
-                print(f"🔥 [智能靜默] 文件過熱 (R1): {os.path.basename(path)}", flush=True)
-                # 加入（add）靜默名單。
+                print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 🔥 [智能靜默] 文件過熱 (R1): {os.path.basename(path)}", flush=True)
                 self.muted_paths.add(path)
                 # 清除（pop）事件記錄。
                 self.hot_events.pop(path, None)
@@ -176,7 +175,7 @@ class SmartThrottler:
                 # 如果（if）增長超過閾值...
                 if growth > self.size_threshold_bytes:
                     # 輸出（print）靜默警告。
-                    print(f"🔥 [智能靜默] 體積異常 (R4): {os.path.basename(path)} (+{growth/1024/1024:.2f}MB)", flush=True)
+                    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 🔥 [智能靜默] 體積異常 (R4): {os.path.basename(path)} (+{growth/1024/1024:.2f}MB)", flush=True)
                     # 加入（add）靜默名單。
                     self.muted_paths.add(path)
                     # 清除（pop）記錄。
@@ -254,14 +253,18 @@ def main():
     # 轉為（set）集合以加速查詢。
     output_file_set = set(output_files)
 
-    # 輸出（print）啟動訊息。
-    print(f"哨兵啟動 (v11.2 完全體)。PID: {os.getpid()}", flush=True)
+    # 獲取啟動時間
+    now = datetime.now()
+    ts = now.strftime('%Y-%m-%d %H:%M:%S')
+
+    # 輸出（print）啟動訊息 (加上時間)
+    print(f"[{ts}] 哨兵啟動 (v11.2 完全體)。PID: {os.getpid()}", flush=True)
     
     # --- 補回黑名單日誌 ---
     if output_files:
-        print(f"【OUTPUT-FILE-BLACKLIST】已加載 {len(output_files)} 個輸出文件到黑名單 (路徑詳情隱藏)", flush=True)
+        print(f"[{ts}] 【OUTPUT-FILE-BLACKLIST】已加載 {len(output_files)} 個輸出文件到黑名單", flush=True)
     else:
-        print("【OUTPUT-FILE-BLACKLIST】未接收到任何輸出文件黑名單", flush=True)
+        print(f"[{ts}] 【OUTPUT-FILE-BLACKLIST】未接收到任何輸出文件黑名單", flush=True)
     # --------------------
     
     # 初始化（init）智能節流器。
@@ -292,11 +295,11 @@ def main():
                 pass
 
     # 輸出（print）建立快照訊息。
-    print("[Step] 建立初始快照...", flush=True)
+    print(f"[{ts}] [Step] 建立初始快照...", flush=True)
     # 建立（create）初始快照。
     last_snapshot = FileSnapshot(project_path)
     # 輸出（print）監控中訊息。
-    print(f"[Step] 監控中 (Files: {len(last_snapshot.files)})", flush=True)
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Step] 監控中 (Files: {len(last_snapshot.files)})", flush=True)
 
     # 嘗試（try）進入主迴圈。
     try:
@@ -328,7 +331,7 @@ def main():
                     # 如果（if）通過大腦審查...
                     if throttler.should_process(evt): 
                         # 輸出（print）偵測訊息。
-                        print(f"[{time.strftime('%H:%M:%S')}] [偵測] created: {os.path.basename(path)}", flush=True)
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [偵測] created: {os.path.basename(path)}", flush=True)
                         # 標記（mark）為有效變動。
                         any_effective_change = True
                 
@@ -339,7 +342,7 @@ def main():
                     # 如果（if）通過大腦審查...
                     if throttler.should_process(evt): 
                         # 輸出（print）偵測訊息。
-                        print(f"[{time.strftime('%H:%M:%S')}] [偵測] modified: {os.path.basename(path)}", flush=True)
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [偵測] modified: {os.path.basename(path)}", flush=True)
                         # 標記（mark）為有效變動。
                         any_effective_change = True
             
@@ -351,7 +354,7 @@ def main():
                     # 如果（if）不是輸出檔案...
                     if path not in output_file_set:
                         # 輸出（print）偵測訊息。
-                        print(f"[{time.strftime('%H:%M:%S')}] [偵測] deleted: {os.path.basename(path)}", flush=True)
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [偵測] deleted: {os.path.basename(path)}", flush=True)
                         # 標記（mark）為有效變動。
                         any_effective_change = True
 
