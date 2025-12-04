@@ -1,4 +1,15 @@
 
+# ## **v7.1.0-beta — Sentry UI v2.0 Sandbox**
+**（2025-12-03）**
+
+### **摘要**
+建立了全新的 UI 架構沙盒 (`v2_sandbox.py`)，引入雙視圖切換與動態視覺引擎。
+
+### **亮點**
+* **哨兵之眼 (The Eye)**：無邊框懸浮窗，具備呼吸光暈、吞噬動畫與意圖感知能力。
+* **貪吃模式 (Hungry Mode)**：實作雙階段拖曳邏輯，智慧引導無 README 的專案註冊。
+* **控制台移植**：完整移植舊版管理介面，並修復了拖曳與多選刪除的 UX 痛點。
+
 # **releases.md（v2.0）**
 
 **Laplace Sentry Control System — Release Notes**

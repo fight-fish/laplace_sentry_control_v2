@@ -1,4 +1,4 @@
-# **PROTOCOL.md（v4.0）**
+# **PROTOCOL.md（v4.1）**
 
 **Sentry Control System — Module Boundary & Communication Contract**
 
@@ -25,11 +25,8 @@
 
 Sentry 系統依照 **四層架構** 運作：
 
-```
-UI Layer  →  Client Layer  →  Daemon Layer  →  Worker Layer
-                 ↑                ↓
-               I/O Layer ← Engine Layer
-```
+UI Layer → Client Layer → Daemon Layer → Worker Layer ↑ ↓ I/O Layer ← Engine Layer
+
 
 每一層都有明確且不可跨越的責任：
 
@@ -54,6 +51,7 @@ UI Layer  →  Client Layer  →  Daemon Layer  →  Worker Layer
 * 點擊以啟動 / 停止哨兵
 * 拖曳資料夾建立專案
 * 顯示錯誤訊息（不解析錯誤原因）
+* **顯示即時日誌（透過 API 獲取）**
 * 絕不直接接觸檔案系統
 
 **禁止：**
@@ -89,6 +87,7 @@ UI Layer  →  Client Layer  →  Daemon Layer  →  Worker Layer
 * 啟動 / 停止哨兵（sentry worker）
 * 主導專案生命週期
 * 解讀 worker 狀態檔（muting 狀態）
+* **提供日誌讀取接口**
 * 產生可供 UI 使用的 **統一資料格式**
 
 **禁止：**
@@ -166,9 +165,8 @@ Engine 必須是「可抽換模組」。
 
 ## ## **4.1 一般操作流程：啟動哨兵**
 
-```
 UI → main.py → daemon.py → sentry_worker.py
-```
+
 
 | 階段 | 主體     | 行為                  |
 | -- | ------ | ------------------- |
@@ -181,9 +179,8 @@ UI → main.py → daemon.py → sentry_worker.py
 
 ## ## **4.2 事件流：檔案事件如何被解析**
 
-```
 watchdog → worker → engine → worker → .sentry_status → daemon → UI
-```
+
 
 詳細表格：
 
@@ -201,9 +198,8 @@ watchdog → worker → engine → worker → .sentry_status → daemon → UI
 
 ## ## **4.3 muting 恢復流程（自愈）**
 
-```
 worker → status file 空 → daemon → UI
-```
+
 
 | 符號 | 行為             |
 | -- | -------------- |
@@ -231,107 +227,101 @@ worker → status file 空 → daemon → UI
     "uuid": "abcd-1234",
     "name": "my_project",
     "path": "/home/xxx/project",
-    "output_file": "/home/xxx/project/out.log",
+    "output_file": ["/home/xxx/project/out.log"],
     "status": "running"
   }
 ]
-```
 
-**禁止：**
+禁止：
 
-* ❌ worker 寫入
-* ❌ engine 寫入
-* ❌ UI 直接操作
-* ❌ 任意模組繞過 atomic_write 寫入
+❌ worker 寫入
+
+❌ engine 寫入
+
+❌ UI 直接操作
+
+❌ 任意模組繞過 atomic_write 寫入
 
 所有寫入必須透過：
 
-```
 io_gateway.safe_read_modify_write()
-```
 
----
-
-## ## **5.2 `.sentry_status`（worker → daemon 的單向訊號）**
-
+## 5.2 .sentry_status（worker → daemon 的單向訊號）
 格式：
 
-```json
 ["/abs/path/file1", "/abs/path/file2"]
-```
 
-* worker 產生
-* worker 清空
-* daemon 解析
-* UI 只能透過 daemon 得到「是否 muting」，不可見到實際路徑
+worker 產生
 
----
+worker 清空
 
-# # **6. 命令契約（Canonical Commands）**
+daemon 解析
 
-### **6.1 專案管理**
+UI 只能透過 daemon 得到「是否 muting」，不可見到實際路徑
 
-| 指令               | 用途            |
-| ---------------- | ------------- |
-| `add_project`    | 新增專案          |
-| `edit_project`   | 修改目錄或寫入檔      |
-| `delete_project` | 刪除專案          |
-| `list_projects`  | 輸出 UI 需要的完整狀態 |
+# 6. 命令契約（Canonical Commands）
 
----
+6.1 專案管理
 
-### **6.2 哨兵控制**
-
-| 指令                     | 用途                    |
-| ---------------------- | --------------------- |
-| `start_sentry <uuid>`  | 啟動 worker             |
-| `stop_sentry <uuid>`   | 停止 worker / 清除 PID    |
-| `manual_update <uuid>` | 手動驅動 worker（optional） |
+指令,用途
+add_project,新增專案
+edit_project,修改目錄或寫入檔
+delete_project,刪除專案
+list_projects,輸出 UI 需要的完整狀態
 
 ---
 
-### **6.3 審計 / 靜默控制**
+6.2 哨兵控制
 
-| 指令                           | 用途                 |
-| ---------------------------- | ------------------ |
-| `add_ignore_patterns <uuid>` | 把 muting 訊號固化成忽略規則 |
-| `reset_ignore_patterns`      | 清空忽略清單（optional）   |
+指令,用途
+start_sentry <uuid>,啟動 worker
+stop_sentry <uuid>,停止 worker / 清除 PID
+manual_update <uuid>,手動驅動 worker（optional）
 
----
+6.3 審計 / 靜默控制
 
-# # **7. 錯誤契約（Error Contract）**
+指令,用途
+add_ignore_patterns <uuid>,把 muting 訊號固化成忽略規則
+reset_ignore_patterns,清空忽略清單（optional）
 
+6.4 資訊與日誌查詢（新增）
+
+指令,用途
+get_log <uuid> [lines],讀取指定專案的日誌末端 (預設 50 行)
+
+# 7. 錯誤契約（Error Contract）
 錯誤一律分成三大類：
 
-| 類型             | 定義                |
-| -------------- | ----------------- |
-| USER_ERROR     | 使用者操作錯誤（輸入、路徑不存在） |
-| SYSTEM_ERROR   | I/O 錯誤、權限、檔案損毀    |
-| INTERNAL_ERROR | 程式碼錯誤、未預期狀況       |
+類型,定義
+USER_ERROR,使用者操作錯誤（輸入、路徑不存在）
+SYSTEM_ERROR,I/O 錯誤、權限、檔案損毀
+INTERNAL_ERROR,程式碼錯誤、未預期狀況
 
-**UI 的責任：只顯示錯誤，不解釋原因。**
-**Daemon 的責任：永遠丟明確的錯誤碼。**
+UI 的責任：只顯示錯誤，不解釋原因。 Daemon 的責任：永遠丟明確的錯誤碼。
 
 ---
 
-# # **8. 禁止規則（Global Forbidden Rules）**
+# 8. 禁止規則（Global Forbidden Rules）
+所有層級都必須遵守：
 
-**所有層級都必須遵守：**
+❌ 不得跨層呼叫（UI 不能直接呼叫 worker）
 
-* ❌ 不得跨層呼叫（UI 不能直接呼叫 worker）
-* ❌ 不得繞過 io_gateway 寫任何資料
-* ❌ 不得在 engine 中引用 OS、I/O、時間
-* ❌ 不得在 worker 中修改 projects.json
-* ❌ 不得讓 daemon 直接監控檔案
-* ❌ 不得在 UI 中解析 status file
+❌ 不得繞過 io_gateway 寫任何資料
+
+❌ 不得在 engine 中引用 OS、I/O、時間
+
+❌ 不得在 worker 中修改 projects.json
+
+❌ 不得讓 daemon 直接監控檔案
+
+❌ 不得在 UI 中解析 status file
 
 這是「系統安全邊界」，永遠不可跨越。
 
 ---
 
-# # **9. 附錄：資料流地圖（Data Flow Diagram）**
+# 9. 附錄：資料流地圖（Data Flow Diagram）
 
-```
                        ┌───────────────┐
                        │     UI Layer   │
                        └───────┬───────┘
@@ -348,9 +338,3 @@ io_gateway.safe_read_modify_write()
                  ▲                              │
                  │                              ▼
                  └────────────── engine.py ─────┘
-```
-
----
-
-# # **完畢（v4.0）**
-
