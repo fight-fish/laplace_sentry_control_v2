@@ -1180,6 +1180,52 @@ def handle_stop_sentry(args: List[str], projects_file_path: Optional[str] = None
                 pass
             del sentry_log_files[uuid_to_stop]
 
+# 理由：新增日誌讀取功能，支援讀取最後 N 行，供 UI 顯示。
+def handle_get_log(args: List[str], projects_file_path: Optional[str] = None) -> List[str]:
+    """
+    【API】讀取指定專案的運作日誌 (Tail Mode)。
+    - 參數: [uuid, lines(選填, 預設50)]
+    - 回傳: List[str] (日誌內容的列表)
+    """
+    PROJECTS_FILE = get_projects_file_path(projects_file_path)
+
+    if len(args) < 1:
+        raise ValueError("【讀取失敗】：需要至少 1 個參數 (uuid)。")
+    
+    uuid_target = args[0]
+    # 如果有第 2 個參數，就用它當作行數限制；否則預設 50 行
+    try:
+        limit = int(args[1]) if len(args) > 1 else 50
+    except ValueError:
+        limit = 50
+
+    # 1. 找到專案設定以計算 Log 檔名
+    projects_data = read_projects_data(PROJECTS_FILE)
+    project_config = next((p for p in projects_data if p.get('uuid') == uuid_target), None)
+
+    if not project_config:
+        # 找不到專案，回傳一個空的提示
+        return [f"錯誤：找不到 UUID 為 {uuid_target} 的專案。"]
+
+    project_name = project_config.get("name", "Unnamed_Project")
+    
+    # 2. 重建 Log 路徑邏輯 (必須與 handle_start_sentry 保持一致)
+    safe_name = "".join(c if c.isalnum() else "_" for c in project_name)
+    log_filename = f"{safe_name}.log"
+    log_path = os.path.join(project_root, 'logs', log_filename)
+
+    # 3. 讀取檔案
+    if not os.path.exists(log_path):
+        return ["(目前沒有日誌檔案，哨兵可能尚未啟動過)"]
+
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+            # 讀取所有行
+            lines = f.readlines()
+            # 只取最後 limit 行
+            return [line.rstrip() for line in lines[-limit:]]
+    except Exception as e:
+        return [f"讀取日誌時發生錯誤：{e}"]
 
 # --- 總調度中心 ---
 # 這個函式像一個電話總機，負責將來自命令行的指令，轉接到對應的處理函式。
@@ -1305,6 +1351,16 @@ def main_dispatcher(argv: List[str], **kwargs):
                     handle_start_sentry([uuid], projects_file_path=projects_file_path)
                 except Exception as e:
                     print(f"【熱重啟失敗】：{e}", file=sys.stderr)
+
+        elif command == 'get_log':
+            # 參數檢查：需要 UUID，選填行數
+            if not args:
+                print("錯誤：缺少 UUID 參數。", file=sys.stderr)
+                return 1
+            # 呼叫我們剛剛寫好的函式
+            result = handle_get_log(args, projects_file_path=projects_file_path)
+            # 將結果轉為 JSON 格式輸出 (方便 Adapter 解析)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
 
         else:
             print(f"錯誤：未知命令 '{command}'。", file=sys.stderr)
